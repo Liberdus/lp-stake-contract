@@ -13,7 +13,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_SIGNERS = 3;
-    uint256 public constant TOTAL_SIGNERS = 5;
+    uint256 public constant TOTAL_SIGNERS = 4;
 
     // Structs
     struct LiquidityPair {
