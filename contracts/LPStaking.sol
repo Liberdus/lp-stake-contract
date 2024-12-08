@@ -15,8 +15,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant MIN_SIGNERS = 3;
     uint256 public constant TOTAL_SIGNERS = 4;
     uint256 public constant MAX_WEIGHT = 10000; // Max weight to prevent overflow
-    uint256 public constant MIN_STAKE = 1e15;   // Minimum stake amount
-    uint256 public constant MAX_PAIRS = 100;    // Maximum number of LP pairs
+    uint256 public constant MIN_STAKE = 1e15; // Minimum stake amount
+    uint256 public constant MAX_PAIRS = 100; // Maximum number of LP pairs
 
     // Structs
     struct LiquidityPair {
@@ -93,34 +93,66 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(pair.rewardWeight > 0, "Pair has zero weight");
         require(amount >= MIN_STAKE, "Stake amount too low");
         require(amount <= type(uint128).max, "Stake amount too high");
-        
+
         updateRewards(msg.sender, lpToken);
-        
+
         UserStake storage userStake = userStakes[msg.sender][lpToken];
         userStake.amount += amount;
         userStake.lastRewardTime = uint64(block.timestamp);
-        
+
         IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
         emit StakeAdded(msg.sender, lpToken, amount);
     }
 
-    function unstake(address lpToken, uint256 amount) external nonReentrant {}
+    function unstake(address lpToken, uint256 amount) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
 
-    function claimRewards(address lpToken) external nonReentrant {}
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        require(userStake.amount >= amount, "Insufficient stake");
+
+        updateRewards(msg.sender, lpToken);
+
+        userStake.amount -= amount;
+        IERC20(lpToken).safeTransfer(msg.sender, amount);
+
+        emit StakeRemoved(msg.sender, lpToken, amount);
+    }
+
+    function claimRewards(address lpToken) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+
+        updateRewards(msg.sender, lpToken);
+
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        uint256 rewards = userStake.pendingRewards;
+        require(rewards > 0, "No rewards to claim");
+
+        userStake.pendingRewards = 0;
+        rewardToken.safeTransfer(msg.sender, rewards);
+
+        emit RewardsClaimed(msg.sender, lpToken, rewards);
+    }
 
     function updateRewards(address user, address lpToken) internal {
         UserStake storage userStake = userStakes[user][lpToken];
         LiquidityPair storage pair = pairs[lpToken];
-        
+
         if (userStake.amount > 0) {
             uint256 timeElapsed = block.timestamp - userStake.lastRewardTime;
             if (timeElapsed > 0) {
-                uint256 totalLPSupply = IERC20(lpToken).balanceOf(address(this));
+                uint256 totalLPSupply = IERC20(lpToken).balanceOf(
+                    address(this)
+                );
                 if (totalLPSupply > 0) {
-                    uint256 rewards = (hourlyRewardRate * timeElapsed * pair.rewardWeight)
-                        / 3600;
-                    rewards = (rewards * userStake.amount) / (totalLPSupply * PRECISION);
-                    
+                    uint256 rewards = (hourlyRewardRate *
+                        timeElapsed *
+                        pair.rewardWeight) / 3600;
+                    rewards =
+                        (rewards * userStake.amount) /
+                        (totalLPSupply * PRECISION);
+
                     if (rewards > 0 && rewards < type(uint128).max) {
                         userStake.pendingRewards += uint128(rewards);
                     }
@@ -132,7 +164,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     function setHourlyRewardRate(
         uint256 newRate
-    ) external onlyRole(ADMIN_ROLE) {}
+    ) external onlyRole(ADMIN_ROLE) {
+        require(newRate <= type(uint128).max, "Rate too high");
+        hourlyRewardRate = newRate;
+        emit HourlyRateUpdated(newRate);
+    }
 
     function updateRewardWeights(
         address[] calldata lpTokens,
@@ -151,7 +187,25 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         emit WeightsUpdated(lpTokens, weights);
     }
 
-    function changeSigner(address oldSigner, address newSigner) external {}
+    function changeSigner(address oldSigner, address newSigner) external {
+        require(hasRole(ADMIN_ROLE, msg.sender), "Not authorized");
+        require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
+        require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
+        require(newSigner != address(0), "Invalid new signer");
+
+        _revokeRole(ADMIN_ROLE, oldSigner);
+        _grantRole(ADMIN_ROLE, newSigner);
+
+        // Update signers array
+        for (uint i = 0; i < signers.length; i++) {
+            if (signers[i] == oldSigner) {
+                signers[i] = newSigner;
+                break;
+            }
+        }
+
+        emit SignerChanged(oldSigner, newSigner);
+    }
 
     function getPairInfo(
         address lpToken
@@ -164,10 +218,18 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             uint256 rewardWeight,
             bool isActive
         )
-    {}
+    {
+        LiquidityPair storage pair = pairs[lpToken];
+        return (pair.lpToken, pair.platform, pair.rewardWeight, pair.isActive);
+    }
 
     function getUserStakeInfo(
         address user,
         address lpToken
-    ) external view returns (uint256 amount, uint256 pendingRewards) {}
+    ) external view returns (uint256 amount, uint256 pendingRewards) {
+        return (
+            userStakes[user][lpToken].amount,
+            userStakes[user][lpToken].pendingRewards
+        );
+    }
 }
