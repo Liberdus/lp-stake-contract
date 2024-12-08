@@ -55,4 +55,73 @@ describe('LPStaking', function () {
       expect(pair.rewardWeight).to.equal(weight);
     });
   });
+
+  describe('Staking', function () {
+    const INITIAL_BALANCE = ethers.parseEther('1000');
+    const STAKE_AMOUNT = ethers.parseEther('100');
+    let user1: SignerWithAddress;
+    let lpTokenAddress: string;
+
+    beforeEach(async function () {
+      [owner, user1, ...signers] = await ethers.getSigners();
+      
+      lpTokenAddress = await lpToken.getAddress();
+      await lpToken.mint(user1.address, INITIAL_BALANCE);
+      await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
+
+      await lpStaking.addLiquidityPair(lpTokenAddress, 'Uniswap-V2', 100);
+
+      await lpStaking.setHourlyRewardRate(ethers.parseEther('10'));
+    });
+
+    it('Should allow staking LP tokens', async function () {
+      await expect(lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT))
+        .to.emit(lpStaking, 'StakeAdded')
+        .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
+
+      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+
+      expect(userStake.amount).to.equal(STAKE_AMOUNT);
+    });
+
+    it('Should not allow staking zero amount', async function () {
+      await expect(
+        lpStaking.connect(user1).stake(lpTokenAddress, 0)
+      ).to.be.revertedWith('Stake amount too low');
+    });
+
+    it('Should not allow staking for inactive pair', async function () {
+      const mockToken = await ethers.deployContract('MockERC20', ['Mock LP', 'MLP']);
+      await expect(
+        lpStaking.connect(user1).stake(await mockToken.getAddress(), STAKE_AMOUNT)
+      ).to.be.revertedWith('Pair not active');
+    });
+
+    it('Should update user stake amount correctly', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      
+      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      expect(userStake.amount).to.equal(STAKE_AMOUNT * 2n);
+    });
+
+    it('Should transfer LP tokens to contract', async function () {
+      const contractAddress = await lpStaking.getAddress();
+      const initialContractBalance = await lpToken.balanceOf(contractAddress);
+      
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      
+      const finalContractBalance = await lpToken.balanceOf(contractAddress);
+      expect(finalContractBalance - initialContractBalance).to.equal(STAKE_AMOUNT);
+    });
+
+    it('Should update lastRewardTime on stake', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      const block = await ethers.provider.getBlock('latest');
+      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      
+      expect(userStake.lastRewardTime).to.equal(block?.timestamp);
+    });
+  });
 });

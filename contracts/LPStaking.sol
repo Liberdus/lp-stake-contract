@@ -14,6 +14,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_SIGNERS = 3;
     uint256 public constant TOTAL_SIGNERS = 4;
+    uint256 public constant MAX_WEIGHT = 10000; // Max weight to prevent overflow
+    uint256 public constant MIN_STAKE = 1e15;   // Minimum stake amount
+    uint256 public constant MAX_PAIRS = 100;    // Maximum number of LP pairs
 
     // Structs
     struct LiquidityPair {
@@ -62,13 +65,16 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     function addLiquidityPair(
         address lpToken,
-        string memory platform,
+        string calldata platform,
         uint256 rewardWeight
     ) external onlyRole(ADMIN_ROLE) {
         require(
             pairs[lpToken].lpToken == IERC20(address(0)),
             "Pair already exists"
         );
+        require(activePairs.length < MAX_PAIRS, "Too many pairs");
+        require(rewardWeight <= MAX_WEIGHT, "Weight too high");
+        require(bytes(platform).length <= 32, "Platform name too long");
 
         pairs[lpToken] = LiquidityPair({
             lpToken: IERC20(lpToken),
@@ -81,13 +87,48 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         emit PairAdded(lpToken, platform, rewardWeight);
     }
 
-    function stake(address lpToken, uint256 amount) external nonReentrant {}
+    function stake(address lpToken, uint256 amount) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+        require(pair.rewardWeight > 0, "Pair has zero weight");
+        require(amount >= MIN_STAKE, "Stake amount too low");
+        require(amount <= type(uint128).max, "Stake amount too high");
+        
+        updateRewards(msg.sender, lpToken);
+        
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        userStake.amount += amount;
+        userStake.lastRewardTime = uint64(block.timestamp);
+        
+        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
+        emit StakeAdded(msg.sender, lpToken, amount);
+    }
 
     function unstake(address lpToken, uint256 amount) external nonReentrant {}
 
     function claimRewards(address lpToken) external nonReentrant {}
 
-    function updateRewards(address user, address lpToken) internal {}
+    function updateRewards(address user, address lpToken) internal {
+        UserStake storage userStake = userStakes[user][lpToken];
+        LiquidityPair storage pair = pairs[lpToken];
+        
+        if (userStake.amount > 0) {
+            uint256 timeElapsed = block.timestamp - userStake.lastRewardTime;
+            if (timeElapsed > 0) {
+                uint256 totalLPSupply = IERC20(lpToken).balanceOf(address(this));
+                if (totalLPSupply > 0) {
+                    uint256 rewards = (hourlyRewardRate * timeElapsed * pair.rewardWeight)
+                        / 3600;
+                    rewards = (rewards * userStake.amount) / (totalLPSupply * PRECISION);
+                    
+                    if (rewards > 0 && rewards < type(uint128).max) {
+                        userStake.pendingRewards += uint128(rewards);
+                    }
+                }
+            }
+        }
+        userStake.lastRewardTime = uint64(block.timestamp);
+    }
 
     function setHourlyRewardRate(
         uint256 newRate
