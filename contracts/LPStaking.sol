@@ -300,10 +300,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function getUserStakeInfo(
         address user,
         address lpToken
-    ) external view returns (uint256 amount, uint256 pendingRewards) {
+    ) external view returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime) {
         return (
             userStakes[user][lpToken].amount,
-            userStakes[user][lpToken].pendingRewards
+            userStakes[user][lpToken].pendingRewards,
+            userStakes[user][lpToken].lastRewardTime
         );
     }
 }

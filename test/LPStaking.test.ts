@@ -11,33 +11,57 @@ describe('LPStaking', function () {
   let owner: SignerWithAddress;
   let signers: SignerWithAddress[];
 
-  async function deployERC20Token() {
+  // Reusable constants
+  const INITIAL_BALANCE = ethers.parseEther('1000');
+  const STAKE_AMOUNT = ethers.parseEther('100');
+  const DAILY_REWARD = ethers.parseEther('240'); // 10 per hour
+  const REWARD_SUPPLY = ethers.parseEther('1000000');
+
+  async function deployBaseFixture() {
+    const [owner, ...signers] = await ethers.getSigners();
+
+    // Deploy tokens
     const mockERC20 = await ethers.getContractFactory('MockERC20');
-    rewardToken = await mockERC20.deploy('Libedus Token', 'LIB');
-    await rewardToken.waitForDeployment();
+    const rewardToken = await mockERC20.deploy('Libedus Token', 'LIB');
+    const lpToken = await mockERC20.deploy('Uniswap-V2 LP Token', 'UNI-V2');
+    await Promise.all([rewardToken.waitForDeployment(), lpToken.waitForDeployment()]);
 
-    lpToken = await mockERC20.deploy('Uniswap-V2 LP Token', 'UNI-V2');
-    await lpToken.waitForDeployment();
-  }
-
-  async function deployLPStaking() {
-    [owner, ...signers] = await ethers.getSigners();
-
+    // Deploy staking contract
     const LPStaking = await ethers.getContractFactory('LPStaking');
-    lpStaking = await LPStaking.deploy(
+    const lpStaking = await LPStaking.deploy(
       await rewardToken.getAddress(),
       signers.slice(0, 4).map((signer) => signer.address)
     );
     await lpStaking.waitForDeployment();
 
-    // Grant ADMIN_ROLE to owner
+    // Setup admin role
     const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
     await lpStaking.grantRole(ADMIN_ROLE, owner.address);
+
+    return { lpStaking, rewardToken, lpToken, owner, signers };
+  }
+
+  async function setupPairAndRate(lpStaking: LPStaking, lpTokenAddress: string, signers: SignerWithAddress[]) {
+    // Helper function to propose and execute action
+    async function proposeAndExecute(proposeFn: Promise<any>) {
+      const receipt = await (await proposeFn).wait();
+      const event = receipt.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = event?.args?.actionId;
+
+      for (let i = 0; i < 2; i++) {
+        await lpStaking.connect(signers[i]).approveAction(Number(actionId));
+      }
+      await lpStaking.executeAction(Number(actionId));
+      return actionId;
+    }
+
+    // Add pair and set rate
+    await proposeAndExecute(lpStaking.proposeAddPair(lpTokenAddress, 'Uniswap-V2', 100));
+    await proposeAndExecute(lpStaking.proposeSetDailyRewardRate(DAILY_REWARD));
   }
 
   beforeEach(async function () {
-    await loadFixture(deployERC20Token);
-    await loadFixture(deployLPStaking);
+    ({ lpStaking, rewardToken, lpToken, owner, signers } = await loadFixture(deployBaseFixture));
   });
 
   describe('Liquidity Pair Management', function () {
@@ -46,19 +70,23 @@ describe('LPStaking', function () {
       const platform = 'Uniswap-V2';
       const weight = 100;
 
-      await expect(lpStaking.addLiquidityPair(lpTokenAddress, platform, weight))
+      const receipt = await (await lpStaking.proposeAddPair(lpTokenAddress, platform, weight)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+
+      await expect(lpStaking.executeAction(Number(actionId)))
         .to.emit(lpStaking, 'PairAdded')
         .withArgs(lpTokenAddress, platform, weight);
 
-      const pair = await lpStaking.pairs(lpTokenAddress);
+      const pair = await lpStaking.getPairInfo(lpTokenAddress);
       expect(pair.isActive).to.be.true;
-      expect(pair.rewardWeight).to.equal(weight);
+      expect(pair.weight).to.equal(weight);
     });
   });
 
   describe('Staking', function () {
-    const INITIAL_BALANCE = ethers.parseEther('1000');
-    const STAKE_AMOUNT = ethers.parseEther('100');
     let user1: SignerWithAddress;
     let lpTokenAddress: string;
 
@@ -69,9 +97,7 @@ describe('LPStaking', function () {
       await lpToken.mint(user1.address, INITIAL_BALANCE);
       await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
 
-      await lpStaking.addLiquidityPair(lpTokenAddress, 'Uniswap-V2', 100);
-
-      await lpStaking.setHourlyRewardRate(ethers.parseEther('10'));
+      await setupPairAndRate(lpStaking, lpTokenAddress, signers);
     });
 
     it('Should allow staking LP tokens', async function () {
@@ -79,13 +105,14 @@ describe('LPStaking', function () {
         .to.emit(lpStaking, 'StakeAdded')
         .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
 
-      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       expect(userStake.amount).to.equal(STAKE_AMOUNT);
     });
 
-    it('Should not allow staking zero amount', async function () {
+    it('Should not allow staking below minimum', async function () {
+      const minStake = await lpStaking.MIN_STAKE();
       await expect(
-        lpStaking.connect(user1).stake(lpTokenAddress, 0)
+        lpStaking.connect(user1).stake(lpTokenAddress, minStake - 1n)
       ).to.be.revertedWith('Stake amount too low');
     });
 
@@ -98,10 +125,9 @@ describe('LPStaking', function () {
 
     it('Should update user stake amount correctly', async function () {
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
-      
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
       
-      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       expect(userStake.amount).to.equal(STAKE_AMOUNT * 2n);
     });
 
@@ -118,15 +144,13 @@ describe('LPStaking', function () {
     it('Should update lastRewardTime on stake', async function () {
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
       const block = await ethers.provider.getBlock('latest');
-      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       
-      expect(userStake.lastRewardTime).to.equal(block?.timestamp);
+      expect(userStake[2]).to.equal(block?.timestamp);
     });
   });
 
   describe('Unstaking', function () {
-    const INITIAL_BALANCE = ethers.parseEther('1000');
-    const STAKE_AMOUNT = ethers.parseEther('100');
     let user1: SignerWithAddress;
     let lpTokenAddress: string;
 
@@ -137,10 +161,7 @@ describe('LPStaking', function () {
       await lpToken.mint(user1.address, INITIAL_BALANCE);
       await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
 
-      await lpStaking.addLiquidityPair(lpTokenAddress, 'Uniswap-V2', 100);
-      await lpStaking.setHourlyRewardRate(ethers.parseEther('10'));
-      
-      // Stake tokens for testing unstake
+      await setupPairAndRate(lpStaking, lpTokenAddress, signers);
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
     });
 
@@ -149,7 +170,7 @@ describe('LPStaking', function () {
         .to.emit(lpStaking, 'StakeRemoved')
         .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
 
-      const userStake = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       expect(userStake.amount).to.equal(0);
     });
 
@@ -169,9 +190,6 @@ describe('LPStaking', function () {
   });
 
   describe('Rewards', function () {
-    const INITIAL_BALANCE = ethers.parseEther('1000');
-    const STAKE_AMOUNT = ethers.parseEther('100');
-    const HOURLY_REWARD = ethers.parseEther('10');
     let user1: SignerWithAddress;
     let lpTokenAddress: string;
 
@@ -182,18 +200,12 @@ describe('LPStaking', function () {
       await lpToken.mint(user1.address, INITIAL_BALANCE);
       await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
       
-      // Mint sufficient reward tokens to contract
-      const REWARD_SUPPLY = ethers.parseEther('1000000');
       await rewardToken.mint(await lpStaking.getAddress(), REWARD_SUPPLY);
-
-      await lpStaking.addLiquidityPair(lpTokenAddress, 'Uniswap-V2', 100); // Set rewardWeight to 100
-      await lpStaking.setHourlyRewardRate(HOURLY_REWARD);
-      
+      await setupPairAndRate(lpStaking, lpTokenAddress, signers);
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
     });
 
     it('Should accumulate rewards over time', async function () {
-      // Simulate time passing (1 hour)
       await ethers.provider.send('evm_increaseTime', [3600]);
       await ethers.provider.send('evm_mine', []);
 
@@ -201,11 +213,8 @@ describe('LPStaking', function () {
       await lpStaking.connect(user1).claimRewards(lpTokenAddress);
       const finalBalance = await rewardToken.balanceOf(user1.address);
       
-      const expectedRewards = HOURLY_REWARD;
-
-      const rewardDifference = finalBalance - initialBalance;
-
-      expect(rewardDifference).to.equal(HOURLY_REWARD);
+      const expectedRewards = DAILY_REWARD / 24n;
+      expect(ethers.parseEther(finalBalance.toString()) - ethers.parseEther(initialBalance.toString())).to.equal(expectedRewards);
     });
 
     it('Should not allow claiming zero rewards', async function () {
@@ -216,60 +225,52 @@ describe('LPStaking', function () {
   });
 
   describe('Admin Functions', function () {
-    const NEW_RATE = ethers.parseEther('20');
-    let admin1: SignerWithAddress;
-    let admin2: SignerWithAddress;
+    const NEW_RATE = ethers.parseEther('480'); // 20 per hour
     let newSigner: SignerWithAddress;
 
     beforeEach(async function () {
-      // Get fresh set of signers
       const allSigners = await ethers.getSigners();
       [owner, ...signers] = allSigners;
+      newSigner = allSigners[10];
 
-      // Deploy contracts with specific signers
-      await loadFixture(deployERC20Token);
-      
-      // Deploy LPStaking with first 4 signers as admins
-      const LPStaking = await ethers.getContractFactory('LPStaking');
-      lpStaking = await LPStaking.deploy(
-        await rewardToken.getAddress(),
-        allSigners.slice(0, 4).map(s => s.address)
-      );
-      await lpStaking.waitForDeployment();
-
-      // Set up roles
-      const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
-      await lpStaking.grantRole(ADMIN_ROLE, owner.address);
-
-      // Use a non-admin signer for the test
-      newSigner = allSigners[10]; // Use a signer well beyond the initial admins
+      ({ lpStaking, rewardToken, lpToken } = await loadFixture(deployBaseFixture));
     });
 
-    it('Should update hourly reward rate', async function () {
-      await expect(lpStaking.setHourlyRewardRate(NEW_RATE))
-        .to.emit(lpStaking, 'HourlyRateUpdated')
+    it('Should update daily reward rate', async function () {
+      const receipt = await (await lpStaking.proposeSetDailyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+
+      await expect(lpStaking.executeAction(Number(actionId)))
+        .to.emit(lpStaking, 'DailyRateUpdated')
         .withArgs(NEW_RATE);
 
-      expect(await lpStaking.hourlyRewardRate()).to.equal(NEW_RATE);
+      expect(await lpStaking.dailyRewardRate()).to.equal(NEW_RATE);
     });
 
     it('Should update reward weights', async function () {
-      // First add the LP pair
       const lpTokenAddress = await lpToken.getAddress();
-      await lpStaking.addLiquidityPair(lpTokenAddress, 'Uniswap-V2', 100);
+      await setupPairAndRate(lpStaking, lpTokenAddress, signers);
 
       const newWeight = 200;
-      await expect(
-        lpStaking.updateRewardWeights([lpTokenAddress], [newWeight])
-      ).to.emit(lpStaking, 'WeightsUpdated')
+      const receipt = await (await lpStaking.proposeUpdatePairWeights([lpTokenAddress], [newWeight])).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+
+      await expect(lpStaking.executeAction(Number(actionId)))
+        .to.emit(lpStaking, 'WeightsUpdated')
         .withArgs([lpTokenAddress], [newWeight]);
 
-      const pair = await lpStaking.pairs(lpTokenAddress);
-      expect(pair.rewardWeight).to.equal(newWeight);
+      const pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.weight).to.equal(newWeight);
     });
 
     it('Should change signer', async function () {
-      const oldSigner = signers[0]; // First signer from the admin group
+      const oldSigner = signers[0];
       
       await expect(lpStaking.changeSigner(oldSigner.address, newSigner.address))
         .to.emit(lpStaking, 'SignerChanged')
