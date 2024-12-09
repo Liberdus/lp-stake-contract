@@ -1,5 +1,5 @@
-import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
+import { HardhatUserConfig } from 'hardhat/config';
+import '@nomicfoundation/hardhat-toolbox';
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -11,6 +11,7 @@ const config: HardhatUserConfig = {
       },
     },
   },
+  defaultNetwork: 'local',
   networks: {
     polygon: {
       url: `https://polygon-mainnet.infura.io/v3/${process.env.INFURA_API_KEY}`,
@@ -23,11 +24,13 @@ const config: HardhatUserConfig = {
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     },
     local: {
-      url: "http://localhost:8545",
+      url: 'http://127.0.0.1:8545',
       chainId: 31337,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
-    }
-  }
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : {
+        mnemonic: "test test test test test test test test test test test junk",
+      },
+    },
+  },
 };
 
 export default config;
