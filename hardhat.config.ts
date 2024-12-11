@@ -1,5 +1,7 @@
 import { HardhatUserConfig } from 'hardhat/config';
 import '@nomicfoundation/hardhat-toolbox';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -14,12 +16,12 @@ const config: HardhatUserConfig = {
   defaultNetwork: 'local',
   networks: {
     polygon: {
-      url: `https://polygon-mainnet.infura.io/v3/${process.env.INFURA_API_KEY}`,
+      url: `https://polygon-mainnet.infura.io/v3/${process.env.INFURA_PROJECT_ID!}`,
       chainId: 137,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     },
     amoy: {
-      url: `https://polygon-amoy.infura.io/v3/${process.env.INFURA_API_KEY}`,
+      url: `https://polygon-amoy.infura.io/v3/${process.env.INFURA_PROJECT_ID!}`,
       chainId: 80002,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     },
@@ -30,6 +32,9 @@ const config: HardhatUserConfig = {
         mnemonic: "test test test test test test test test test test test junk",
       },
     },
+  },
+  etherscan: {
+    apiKey: process.env.POLYGONSCAN_API_KEY!,
   },
 };
 
