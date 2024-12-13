@@ -56,7 +56,7 @@ describe('LPStaking', function () {
     }
 
     // Add pair and set rate
-    await proposeAndExecute(lpStaking.proposeAddPair(lpTokenAddress, 'Uniswap-V2', 100));
+    await proposeAndExecute(lpStaking.proposeAddPair(lpTokenAddress, 'LIB-USDT', 'Uniswap-V2', 100000000000000));
     await proposeAndExecute(lpStaking.proposeSetDailyRewardRate(DAILY_REWARD));
   }
 
@@ -68,9 +68,9 @@ describe('LPStaking', function () {
     it('Should add a new liquidity pair', async function () {
       const lpTokenAddress = await lpToken.getAddress();
       const platform = 'Uniswap-V2';
-      const weight = 100;
+      const weight = 100000000000000000000n;
 
-      const receipt = await (await lpStaking.proposeAddPair(lpTokenAddress, platform, weight)).wait();
+      const receipt = await (await lpStaking.proposeAddPair(lpTokenAddress, 'LIB-USDT', platform, weight)).wait();
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
 

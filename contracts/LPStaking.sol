@@ -14,9 +14,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_SIGNERS = 3;
     uint256 public constant TOTAL_SIGNERS = 4;
-    uint256 public constant MAX_WEIGHT = 10000; 
-    uint256 public constant MIN_STAKE = 1e15; 
-    uint256 public constant MAX_PAIRS = 100; 
+    uint256 public constant MAX_WEIGHT = 1000000000000000000000; // weight 1000 precision 1e18
+    uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
+    uint256 public constant MAX_PAIRS = 100;
 
     uint256 public constant REQUIRED_APPROVALS = 1;
     uint256 private constant SECONDS_PER_DAY = 86400;
@@ -24,6 +24,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     // Structs
     struct LiquidityPair {
         IERC20 lpToken;
+        string pairName;
         string platform;
         uint256 weight;
         bool isActive;
@@ -31,8 +32,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     struct UserStake {
         uint256 amount;
-        uint256 lastRewardTime; 
-        uint256 pendingRewards; 
+        uint256 lastRewardTime;
+        uint256 pendingRewards;
     }
 
     enum ActionType {
@@ -47,6 +48,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         address[] pairs;
         uint256[] weights;
         address pairToAdd;
+        string pairNameToAdd;
         string platformToAdd;
         uint256 weightToAdd;
         bool executed;
@@ -57,8 +59,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     // State variables
     IERC20 public rewardToken;
     uint256 public dailyRewardRate;
-    mapping(address => LiquidityPair) public pairs; 
-    mapping(address => mapping(address => UserStake)) public userStakes; 
+    mapping(address => LiquidityPair) public pairs;
+    mapping(address => mapping(address => UserStake)) public userStakes;
     address[] public activePairs;
     address[] public signers;
 
@@ -75,7 +77,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event DailyRateUpdated(uint256 newRate);
     event WeightsUpdated(address[] pairs, uint256[] weights);
     event SignerChanged(address oldSigner, address newSigner);
-    event ActionProposed(uint256 actionId, address proposer, ActionType actionType);
+    event ActionProposed(
+        uint256 actionId,
+        address proposer,
+        ActionType actionType
+    );
     event ActionApproved(uint256 actionId, address approver);
     event ActionExecuted(uint256 actionId);
 
@@ -93,18 +99,27 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
     }
 
-    function proposeSetDailyRewardRate(uint256 newRate) external onlyRole(ADMIN_ROLE) returns (uint256) {
+    function proposeSetDailyRewardRate(
+        uint256 newRate
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_DAILY_REWARD_RATE;
         pa.newDailyRewardRate = newRate;
 
-        emit ActionProposed(actionCounter, msg.sender, ActionType.SET_DAILY_REWARD_RATE);
+        emit ActionProposed(
+            actionCounter,
+            msg.sender,
+            ActionType.SET_DAILY_REWARD_RATE
+        );
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
 
-    function proposeUpdatePairWeights(address[] calldata lpTokens, uint256[] calldata weights) external onlyRole(ADMIN_ROLE) returns (uint256) {
+    function proposeUpdatePairWeights(
+        address[] calldata lpTokens,
+        uint256[] calldata weights
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpTokens.length == weights.length, "Array lengths must match");
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -112,17 +127,27 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         pa.pairs = lpTokens;
         pa.weights = weights;
 
-        emit ActionProposed(actionCounter, msg.sender, ActionType.UPDATE_PAIR_WEIGHTS);
+        emit ActionProposed(
+            actionCounter,
+            msg.sender,
+            ActionType.UPDATE_PAIR_WEIGHTS
+        );
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
 
-    function proposeAddPair(address lpToken, string calldata platform, uint256 weight) external onlyRole(ADMIN_ROLE) returns (uint256) {
+    function proposeAddPair(
+        address lpToken,
+        string calldata pairName,
+        string calldata platform,
+        uint256 weight
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpToken != address(0), "Invalid pair");
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.ADD_PAIR;
         pa.pairToAdd = lpToken;
+        pa.pairNameToAdd = pairName;
         pa.platformToAdd = platform;
         pa.weightToAdd = weight;
 
@@ -158,7 +183,10 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             uint256 len = pa.pairs.length;
             totalWeight = 0;
             for (uint i = 0; i < len; i++) {
-                require(pairs[pa.pairs[i]].lpToken != IERC20(address(0)), "Pair doesn't exist");
+                require(
+                    pairs[pa.pairs[i]].lpToken != IERC20(address(0)),
+                    "Pair doesn't exist"
+                );
                 pairs[pa.pairs[i]].weight = pa.weights[i];
             }
             for (uint j = 0; j < activePairs.length; j++) {
@@ -172,10 +200,14 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             );
             require(activePairs.length < MAX_PAIRS, "Too many pairs");
             require(pa.weightToAdd <= MAX_WEIGHT, "Weight too high");
-            require(bytes(pa.platformToAdd).length <= 32, "Platform name too long");
+            require(
+                bytes(pa.platformToAdd).length <= 32,
+                "Platform name too long"
+            );
 
             pairs[pa.pairToAdd] = LiquidityPair({
                 lpToken: IERC20(pa.pairToAdd),
+                pairName: pa.pairNameToAdd,
                 platform: pa.platformToAdd,
                 weight: pa.weightToAdd,
                 isActive: true
@@ -244,14 +276,19 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         if (userStake.amount > 0) {
             uint256 timeElapsed = block.timestamp - userStake.lastRewardTime;
             if (timeElapsed > 0 && totalWeight > 0) {
-                uint256 totalLPSupply = IERC20(lpToken).balanceOf(address(this));
+                uint256 totalLPSupply = IERC20(lpToken).balanceOf(
+                    address(this)
+                );
                 if (totalLPSupply > 0) {
                     uint256 rewardPerSecond = dailyRewardRate / SECONDS_PER_DAY;
                     // Distribute rewards based on pair weight
                     // rewards = rate * timeElapsed * (pairWeight/totalWeight) * (userAmount/totalSupply)
                     // incorporate PRECISION
-                    uint256 pairRewards = rewardPerSecond * timeElapsed * pair.weight / totalWeight;
-                    uint256 rewards = pairRewards * userStake.amount / (totalLPSupply * PRECISION);
+                    uint256 pairRewards = (rewardPerSecond *
+                        timeElapsed *
+                        pair.weight) / totalWeight;
+                    uint256 rewards = (pairRewards * userStake.amount) /
+                        (totalLPSupply * PRECISION);
 
                     if (rewards > 0 && rewards < type(uint128).max) {
                         userStake.pendingRewards += uint128(rewards);
@@ -300,11 +337,54 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function getUserStakeInfo(
         address user,
         address lpToken
-    ) external view returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime) {
+    )
+        external
+        view
+        returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
+    {
         return (
             userStakes[user][lpToken].amount,
             userStakes[user][lpToken].pendingRewards,
             userStakes[user][lpToken].lastRewardTime
         );
+    }
+
+    function getActivePairs() external view returns (address[] memory) {
+        return activePairs;
+    }
+
+    function getSigners() external view returns (address[] memory) {
+        return signers;
+    }
+
+    function getPairs() external view returns (LiquidityPair[] memory) {
+        LiquidityPair[] memory pairsArray = new LiquidityPair[](
+            activePairs.length
+        );
+        for (uint i = 0; i < activePairs.length; i++) {
+            pairsArray[i] = pairs[activePairs[i]];
+        }
+        return pairsArray;
+    }
+
+    function getUserStakes(
+        address user
+    ) external view returns (UserStake[] memory) {
+        uint256 stakeCount = 0;
+        for (uint i = 0; i < activePairs.length; i++) {
+            if (userStakes[user][activePairs[i]].amount > 0) {
+                stakeCount++;
+            }
+        }
+
+        UserStake[] memory stakesArray = new UserStake[](stakeCount);
+        uint256 index = 0;
+        for (uint i = 0; i < activePairs.length; i++) {
+            if (userStakes[user][activePairs[i]].amount > 0) {
+                stakesArray[index] = userStakes[user][activePairs[i]];
+                index++;
+            }
+        }
+        return stakesArray;
     }
 }
