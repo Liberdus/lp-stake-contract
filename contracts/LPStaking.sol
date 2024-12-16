@@ -19,7 +19,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant MAX_PAIRS = 100;
 
     uint256 public constant REQUIRED_APPROVALS = 1;
-    uint256 private constant SECONDS_PER_DAY = 86400;
+    uint256 private constant SECONDS_PER_HOUR = 3600;
 
     // Structs
     struct LiquidityPair {
@@ -37,7 +37,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     }
 
     enum ActionType {
-        SET_DAILY_REWARD_RATE,
+        SET_HOURLY_REWARD_RATE,
         UPDATE_PAIR_WEIGHTS,
         ADD_PAIR,
         REMOVE_PAIR
@@ -45,7 +45,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     struct PendingAction {
         ActionType actionType;
-        uint256 newDailyRewardRate;
+        uint256 newHourlyRewardRate;
         address[] pairs;
         uint256[] weights;
         address pairToAdd;
@@ -60,7 +60,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     // State variables
     IERC20 public rewardToken;
-    uint256 public dailyRewardRate;
+    uint256 public hourlyRewardRate;
     mapping(address => LiquidityPair) public pairs;
     mapping(address => mapping(address => UserStake)) public userStakes;
     address[] public activePairs;
@@ -77,7 +77,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event StakeAdded(address user, address lpToken, uint256 amount);
     event StakeRemoved(address user, address lpToken, uint256 amount);
     event RewardsClaimed(address user, address lpToken, uint256 amount);
-    event DailyRateUpdated(uint256 newRate);
+    event HourlyRateUpdated(uint256 newRate);
     event WeightsUpdated(address[] pairs, uint256[] weights);
     event SignerChanged(address oldSigner, address newSigner);
     event ActionProposed(
@@ -102,18 +102,18 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
     }
 
-    function proposeSetDailyRewardRate(
+    function proposeSetHourlyRewardRate(
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
-        pa.actionType = ActionType.SET_DAILY_REWARD_RATE;
-        pa.newDailyRewardRate = newRate;
+        pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
+        pa.newHourlyRewardRate = newRate;
 
         emit ActionProposed(
             actionCounter,
             msg.sender,
-            ActionType.SET_DAILY_REWARD_RATE
+            ActionType.SET_HOURLY_REWARD_RATE
         );
         _approveActionInternal(actionCounter);
         return actionCounter;
@@ -196,9 +196,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(!pa.executed, "Already executed");
         require(pa.approvals >= REQUIRED_APPROVALS, "Not enough approvals");
 
-        if (pa.actionType == ActionType.SET_DAILY_REWARD_RATE) {
-            dailyRewardRate = pa.newDailyRewardRate;
-            emit DailyRateUpdated(dailyRewardRate);
+        if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE) {
+            hourlyRewardRate = pa.newHourlyRewardRate;
+            emit HourlyRateUpdated(hourlyRewardRate);
         } else if (pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS) {
             uint256 len = pa.pairs.length;
             totalWeight = 0;
@@ -323,7 +323,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                     address(this)
                 );
                 if (totalLPSupply > 0) {
-                    uint256 rewardPerSecond = dailyRewardRate / SECONDS_PER_DAY;
+                    uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
                     // Distribute rewards based on pair weight
                     // rewards = rate * timeElapsed * (pairWeight/totalWeight) * (userAmount/totalSupply)
                     // incorporate PRECISION
