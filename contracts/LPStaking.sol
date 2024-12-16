@@ -112,6 +112,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function proposeSetHourlyRewardRate(
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
+        updateAllRewards();
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
@@ -131,6 +132,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256[] calldata weights
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpTokens.length == weights.length, "Array lengths must match");
+        updateAllRewards();
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.UPDATE_PAIR_WEIGHTS;
@@ -146,46 +148,18 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
-    function proposeAddPair(
-        address lpToken,
-        string calldata pairName,
-        string calldata platform,
-        uint256 weight
-    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
-        require(lpToken != address(0), "Invalid pair");
-        actionCounter++;
-        PendingAction storage pa = actions[actionCounter];
-        pa.actionType = ActionType.ADD_PAIR;
-        pa.pairToAdd = lpToken;
-        pa.pairNameToAdd = pairName;
-        pa.platformToAdd = platform;
-        pa.weightToAdd = weight;
+    function updateAllRewards() internal {
+        for (uint i = 0; i < activePairs.length; i++) {
+            address lpToken = activePairs[i];
+            uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
 
-        emit ActionProposed(actionCounter, msg.sender, ActionType.ADD_PAIR);
-        _approveActionInternal(actionCounter);
-        return actionCounter;
-    }
-
-    function proposeRemovePair(address lpToken)
-        external
-        onlyRole(ADMIN_ROLE)
-        returns (uint256)
-    {
-        require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
-
-        actionCounter++;
-        PendingAction storage pa = actions[actionCounter];
-        pa.actionType = ActionType.REMOVE_PAIR;
-        pa.pairToRemove = lpToken;
-
-        emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
-        _approveActionInternal(actionCounter);
-        return actionCounter;
-    }
-
-    function approveAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
-        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
-        _approveActionInternal(actionId);
+            if (totalSupply > 0) {
+                for (uint j = 0; j < activePairs.length; j++) {
+                    address user = activePairs[j];
+                    updateRewards(user, lpToken);
+                }
+            }
+        }
     }
 
     function _approveActionInternal(uint256 actionId) internal {
