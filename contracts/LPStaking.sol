@@ -39,7 +39,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     enum ActionType {
         SET_DAILY_REWARD_RATE,
         UPDATE_PAIR_WEIGHTS,
-        ADD_PAIR
+        ADD_PAIR,
+        REMOVE_PAIR
     }
 
     struct PendingAction {
@@ -51,6 +52,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         string pairNameToAdd;
         string platformToAdd;
         uint256 weightToAdd;
+        address pairToRemove;
         bool executed;
         uint8 approvals;
         mapping(address => bool) approvedBy;
@@ -71,6 +73,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     // Events
     event PairAdded(address lpToken, string platform, uint256 weight);
+    event PairRemoved(address lpToken);
     event StakeAdded(address user, address lpToken, uint256 amount);
     event StakeRemoved(address user, address lpToken, uint256 amount);
     event RewardsClaimed(address user, address lpToken, uint256 amount);
@@ -156,6 +159,23 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
+    function proposeRemovePair(address lpToken)
+        external
+        onlyRole(ADMIN_ROLE)
+        returns (uint256)
+    {
+        require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
+
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.REMOVE_PAIR;
+        pa.pairToRemove = lpToken;
+
+        emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
+        _approveActionInternal(actionCounter);
+        return actionCounter;
+    }
+
     function approveAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         _approveActionInternal(actionId);
@@ -215,10 +235,33 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             activePairs.push(pa.pairToAdd);
             totalWeight += pa.weightToAdd;
             emit PairAdded(pa.pairToAdd, pa.platformToAdd, pa.weightToAdd);
+        } else if (pa.actionType == ActionType.REMOVE_PAIR) {
+            address lpToken = pa.pairToRemove;
+            require(pairs[lpToken].isActive, "Pair not active");
+            
+            totalWeight -= pairs[lpToken].weight;
+            
+            pairs[lpToken].isActive = false;
+            pairs[lpToken].weight = 0;
+
+            _removeActivePair(lpToken);
+
+            emit PairRemoved(lpToken);
         }
 
         pa.executed = true;
         emit ActionExecuted(actionId);
+    }
+
+    function _removeActivePair(address lpToken) internal {
+        uint256 length = activePairs.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (activePairs[i] == lpToken) {
+                activePairs[i] = activePairs[length - 1];
+                activePairs.pop();
+                break;
+            }
+        }
     }
 
     function stake(address lpToken, uint256 amount) external nonReentrant {
