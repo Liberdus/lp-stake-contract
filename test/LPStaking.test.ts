@@ -269,13 +269,22 @@ describe('LPStaking', function () {
       expect(pair.weight).to.equal(newWeight);
     });
 
-    it('Should change signer', async function () {
+    it('Should change signer through multisig', async function () {
       const oldSigner = signers[0];
-      
-      await expect(lpStaking.changeSigner(oldSigner.address, newSigner.address))
+      const newSigner = signers[5];
+    
+      // Propose the signer change
+      const receipt = await (await lpStaking.connect(signers[1]).proposeChangeSigner(oldSigner.address, newSigner.address)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+    
+      await lpStaking.connect(signers[2]).approveAction(actionId);
+      await lpStaking.connect(signers[3]).approveAction(actionId);
+    
+      await expect(lpStaking.connect(signers[1]).executeAction(actionId))
         .to.emit(lpStaking, 'SignerChanged')
         .withArgs(oldSigner.address, newSigner.address);
-
+    
       const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
       expect(await lpStaking.hasRole(ADMIN_ROLE, newSigner.address)).to.be.true;
       expect(await lpStaking.hasRole(ADMIN_ROLE, oldSigner.address)).to.be.false;

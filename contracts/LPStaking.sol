@@ -39,7 +39,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         SET_HOURLY_REWARD_RATE,
         UPDATE_PAIR_WEIGHTS,
         ADD_PAIR,
-        REMOVE_PAIR
+        REMOVE_PAIR,
+        CHANGE_SIGNER
     }
 
     struct PendingAction {
@@ -162,6 +163,48 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
     }
 
+    function proposeAddPair(
+        address lpToken,
+        string calldata pairName,
+        string calldata platform,
+        uint256 weight
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
+        require(lpToken != address(0), "Invalid pair");
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.ADD_PAIR;
+        pa.pairToAdd = lpToken;
+        pa.pairNameToAdd = pairName;
+        pa.platformToAdd = platform;
+        pa.weightToAdd = weight;
+
+        emit ActionProposed(actionCounter, msg.sender, ActionType.ADD_PAIR);
+        _approveActionInternal(actionCounter);
+        return actionCounter;
+    }
+
+    function proposeRemovePair(address lpToken)
+        external
+        onlyRole(ADMIN_ROLE)
+        returns (uint256)
+    {
+        require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
+
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.REMOVE_PAIR;
+        pa.pairToRemove = lpToken;
+
+        emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
+        _approveActionInternal(actionCounter);
+        return actionCounter;
+    }
+
+    function approveAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        _approveActionInternal(actionId);
+    }
+
     function _approveActionInternal(uint256 actionId) internal {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
@@ -228,6 +271,20 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             _removeActivePair(lpToken);
 
             emit PairRemoved(lpToken);
+        } else if (pa.actionType == ActionType.CHANGE_SIGNER) {
+            address oldSigner = pa.pairToAdd;
+            address newSigner = pa.pairToRemove;
+
+            _revokeRole(ADMIN_ROLE, oldSigner);
+            _grantRole(ADMIN_ROLE, newSigner);
+
+            for (uint i = 0; i < signers.length; i++) {
+                if (signers[i] == oldSigner) {
+                    signers[i] = newSigner;
+                    break;
+                }
+            }
+            emit SignerChanged(oldSigner, newSigner);
         }
 
         pa.executed = true;
@@ -332,23 +389,23 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         userStake.lastRewardTime = uint64(block.timestamp);
     }
 
-    function changeSigner(address oldSigner, address newSigner) external {
-        require(hasRole(ADMIN_ROLE, msg.sender), "Not authorized");
+    function proposeChangeSigner(
+        address oldSigner,
+        address newSigner
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
         require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
         require(newSigner != address(0), "Invalid new signer");
 
-        _revokeRole(ADMIN_ROLE, oldSigner);
-        _grantRole(ADMIN_ROLE, newSigner);
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.CHANGE_SIGNER;
+        pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
+        pa.pairToRemove = newSigner;
 
-        for (uint i = 0; i < signers.length; i++) {
-            if (signers[i] == oldSigner) {
-                signers[i] = newSigner;
-                break;
-            }
-        }
-
-        emit SignerChanged(oldSigner, newSigner);
+        emit ActionProposed(actionCounter, msg.sender, ActionType.CHANGE_SIGNER);
+        _approveActionInternal(actionCounter);
+        return actionCounter;
     }
 
     function getPairInfo(
