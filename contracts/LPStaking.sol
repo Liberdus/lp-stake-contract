@@ -14,10 +14,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MIN_SIGNERS = 3;
     uint256 public constant TOTAL_SIGNERS = 4;
-    uint256 public constant MAX_WEIGHT = 1000000000000000000000; // weight 1000 precision 1e18
+    uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
     uint256 public constant MAX_PAIRS = 100;
-
     uint256 public constant REQUIRED_APPROVALS = 1;
     uint256 private constant SECONDS_PER_HOUR = 3600;
 
@@ -67,7 +66,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     address[] public signers;
 
     uint256 public totalWeight;
-
     uint256 public actionCounter;
     mapping(uint256 => PendingAction) public actions;
 
@@ -290,10 +288,22 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         updateRewards(msg.sender, lpToken);
 
-        userStake.amount -= amount;
-        IERC20(lpToken).safeTransfer(msg.sender, amount);
+        uint256 rewards = userStake.pendingRewards;
+        userStake.pendingRewards = 0;
+
+        if (amount == userStake.amount) {
+            userStake.amount = 0;
+            IERC20(lpToken).safeTransfer(msg.sender, amount);
+            rewardToken.safeTransfer(msg.sender, rewards);
+        } else {
+            userStake.amount -= amount;
+            IERC20(lpToken).safeTransfer(msg.sender, amount);
+        }
 
         emit StakeRemoved(msg.sender, lpToken, amount);
+        if (rewards > 0) {
+            emit RewardsClaimed(msg.sender, lpToken, rewards);
+        }
     }
 
     function claimRewards(address lpToken) external nonReentrant {
@@ -324,9 +334,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                 );
                 if (totalLPSupply > 0) {
                     uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-                    // Distribute rewards based on pair weight
-                    // rewards = rate * timeElapsed * (pairWeight/totalWeight) * (userAmount/totalSupply)
-                    // incorporate PRECISION
                     uint256 pairRewards = (rewardPerSecond *
                         timeElapsed *
                         pair.weight) / totalWeight;
