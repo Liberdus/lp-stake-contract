@@ -85,6 +85,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     );
     event ActionApproved(uint256 actionId, address approver);
     event ActionExecuted(uint256 actionId);
+    event RewardsWithdrawn(address recipient, uint256 amount);
 
     constructor(address _rewardToken, address[] memory _initialSigners) {
         require(
@@ -98,6 +99,14 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         for (uint i = 0; i < _initialSigners.length; i++) {
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
         }
+    }
+
+    function withdrawRewards(address recipient, uint256 amount) external onlyRole(ADMIN_ROLE) {
+        require(recipient != address(0), "Invalid recipient address");
+        require(amount > 0, "Amount must be greater than zero");
+
+        rewardToken.safeTransfer(recipient, amount);
+        emit RewardsWithdrawn(recipient, amount);
     }
 
     function proposeSetHourlyRewardRate(
