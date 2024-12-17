@@ -40,7 +40,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         UPDATE_PAIR_WEIGHTS,
         ADD_PAIR,
         REMOVE_PAIR,
-        CHANGE_SIGNER
+        CHANGE_SIGNER,
+        WITHDRAW_REWARDS
     }
 
     struct PendingAction {
@@ -53,6 +54,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         string platformToAdd;
         uint256 weightToAdd;
         address pairToRemove;
+        address recipient;
+        uint256 withdrawAmount;
         bool executed;
         uint8 approvals;
         mapping(address => bool) approvedBy;
@@ -102,12 +105,26 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
     }
 
-    function withdrawRewards(address recipient, uint256 amount) external onlyRole(ADMIN_ROLE) {
+    function proposeWithdrawRewards(
+        address recipient,
+        uint256 amount
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(recipient != address(0), "Invalid recipient address");
         require(amount > 0, "Amount must be greater than zero");
 
-        rewardToken.safeTransfer(recipient, amount);
-        emit RewardsWithdrawn(recipient, amount);
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.WITHDRAW_REWARDS;
+        pa.recipient = recipient;
+        pa.withdrawAmount = amount;
+
+        emit ActionProposed(
+            actionCounter,
+            msg.sender,
+            ActionType.WITHDRAW_REWARDS
+        );
+        _approveActionInternal(actionCounter);
+        return actionCounter;
     }
 
     function proposeSetHourlyRewardRate(
@@ -183,11 +200,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
-    function proposeRemovePair(address lpToken)
-        external
-        onlyRole(ADMIN_ROLE)
-        returns (uint256)
-    {
+    function proposeRemovePair(
+        address lpToken
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
 
         actionCounter++;
@@ -262,9 +277,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         } else if (pa.actionType == ActionType.REMOVE_PAIR) {
             address lpToken = pa.pairToRemove;
             require(pairs[lpToken].isActive, "Pair not active");
-            
+
             totalWeight -= pairs[lpToken].weight;
-            
+
             pairs[lpToken].isActive = false;
             pairs[lpToken].weight = 0;
 
@@ -285,6 +300,15 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                 }
             }
             emit SignerChanged(oldSigner, newSigner);
+        } else if (pa.actionType == ActionType.WITHDRAW_REWARDS) {
+            require(pa.recipient != address(0), "Invalid recipient");
+            require(
+                rewardToken.balanceOf(address(this)) >= pa.withdrawAmount,
+                "Insufficient contract balance"
+            );
+
+            rewardToken.safeTransfer(pa.recipient, pa.withdrawAmount);
+            emit RewardsWithdrawn(pa.recipient, pa.withdrawAmount);
         }
 
         pa.executed = true;
@@ -373,7 +397,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                     address(this)
                 );
                 if (totalLPSupply > 0) {
-                    uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+                    uint256 rewardPerSecond = hourlyRewardRate /
+                        SECONDS_PER_HOUR;
                     uint256 pairRewards = (rewardPerSecond *
                         timeElapsed *
                         pair.weight) / totalWeight;
@@ -403,7 +428,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
         pa.pairToRemove = newSigner;
 
-        emit ActionProposed(actionCounter, msg.sender, ActionType.CHANGE_SIGNER);
+        emit ActionProposed(
+            actionCounter,
+            msg.sender,
+            ActionType.CHANGE_SIGNER
+        );
         _approveActionInternal(actionCounter);
         return actionCounter;
     }

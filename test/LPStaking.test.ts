@@ -234,6 +234,7 @@ describe('LPStaking', function () {
       newSigner = allSigners[10];
 
       ({ lpStaking, rewardToken, lpToken } = await loadFixture(deployBaseFixture));
+      await rewardToken.mint(await lpStaking.getAddress(), REWARD_SUPPLY);
     });
 
     it('Should update daily reward rate', async function () {
@@ -288,6 +289,21 @@ describe('LPStaking', function () {
       const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
       expect(await lpStaking.hasRole(ADMIN_ROLE, newSigner.address)).to.be.true;
       expect(await lpStaking.hasRole(ADMIN_ROLE, oldSigner.address)).to.be.false;
+    });
+
+    it('Should withdraw rewards', async function () {
+      const receipt = await (await lpStaking.proposeWithdrawRewards(signers[1].address, STAKE_AMOUNT)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+
+      await expect(lpStaking.connect(signers[1]).executeAction(actionId))
+        .to.emit(lpStaking, 'RewardsWithdrawn')
+        .withArgs(signers[1].address, STAKE_AMOUNT);
+
+        const balance = await rewardToken.balanceOf(signers[1].address);
+        expect(balance).to.equal(STAKE_AMOUNT);
     });
   });
 });
