@@ -17,7 +17,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
     uint256 public constant MAX_PAIRS = 100;
-    uint256 public constant REQUIRED_APPROVALS = 1;
+    uint256 public constant REQUIRED_APPROVALS = 3;
     uint256 private constant SECONDS_PER_HOUR = 3600;
 
     // Structs
