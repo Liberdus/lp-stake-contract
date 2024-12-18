@@ -58,7 +58,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 withdrawAmount;
         bool executed;
         uint8 approvals;
-        mapping(address => bool) approvedBy;
+        address[] approvedBy;
     }
 
     // State variables
@@ -103,6 +103,25 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         for (uint i = 0; i < _initialSigners.length; i++) {
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
         }
+    }
+
+    // Add getter functions for array data in PendingAction
+    function getActionPairs(
+        uint256 actionId
+    ) external view returns (address[] memory) {
+        return actions[actionId].pairs;
+    }
+
+    function getActionWeights(
+        uint256 actionId
+    ) external view returns (uint256[] memory) {
+        return actions[actionId].weights;
+    }
+
+    function getActionApproval(
+        uint256 actionId
+    ) external view returns (address[] memory) {
+        return actions[actionId].approvedBy;
     }
 
     function proposeWithdrawRewards(
@@ -223,8 +242,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function _approveActionInternal(uint256 actionId) internal {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
-        require(!pa.approvedBy[msg.sender], "Already approved");
-        pa.approvedBy[msg.sender] = true;
+
+        // Check if already approved
+        for (uint i = 0; i < pa.approvedBy.length; i++) {
+            require(pa.approvedBy[i] != msg.sender, "Already approved");
+        }
+
+        pa.approvedBy.push(msg.sender);
         pa.approvals++;
         emit ActionApproved(actionId, msg.sender);
     }
