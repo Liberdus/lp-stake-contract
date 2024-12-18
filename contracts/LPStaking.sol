@@ -59,6 +59,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         address recipient;
         uint256 withdrawAmount;
         bool executed;
+        bool expired;
         uint8 approvals;
         address[] approvedBy;
         uint256 proposedTime; // Timestamp when action was proposed
@@ -131,6 +132,32 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 actionId
     ) external view returns (address[] memory) {
         return actions[actionId].approvedBy;
+    }
+
+    function isActionExpired(uint256 actionId) public view returns (bool) {
+        PendingAction storage pa = actions[actionId];
+        return block.timestamp > pa.proposedTime + ACTION_EXPIRY;
+    }
+
+    function handleExpiredAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        PendingAction storage pa = actions[actionId];
+        require(!pa.executed, "Action already executed");
+        require(!pa.expired, "Action already marked expired");
+        require(isActionExpired(actionId), "Action not expired yet");
+
+        pa.expired = true;
+        emit ActionExpired(actionId);
+    }
+
+    function cleanupExpiredActions() external onlyRole(ADMIN_ROLE) {
+        for(uint256 i = 1; i <= actionCounter; i++) {
+            PendingAction storage pa = actions[i];
+            if(!pa.executed && !pa.expired && isActionExpired(i)) {
+                pa.expired = true;
+                emit ActionExpired(i);
+            }
+        }
     }
 
     function proposeWithdrawRewards(
@@ -298,6 +325,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function _approveActionInternal(uint256 actionId) internal {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
+        require(!pa.expired, "Action has expired");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
@@ -317,6 +345,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
+        require(!pa.expired, "Action has expired");
         require(pa.approvals >= REQUIRED_APPROVALS, "Not enough approvals");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
