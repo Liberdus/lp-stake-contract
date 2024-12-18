@@ -34,6 +34,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 amount;
         uint256 lastRewardTime;
         uint256 pendingRewards;
+        uint256 rewardPerTokenPaid;
     }
 
     enum ActionType {
@@ -71,6 +72,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     address[] public activePairs;
     address[] public signers;
 
+    // Reward tracking
+    mapping(address => uint256) public rewardPerTokenStored;
+    mapping(address => uint256) public lastUpdateTime;
     uint256 public totalWeight;
     uint256 public actionCounter;
     mapping(uint256 => PendingAction) public actions;
@@ -210,15 +214,35 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function updateAllRewards() internal {
         for (uint i = 0; i < activePairs.length; i++) {
             address lpToken = activePairs[i];
-            uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
-
-            if (totalSupply > 0) {
-                for (uint j = 0; j < activePairs.length; j++) {
-                    address user = activePairs[j];
-                    updateRewards(user, lpToken);
-                }
-            }
+            updateRewardPerToken(lpToken);
         }
+    }
+
+    function updateRewardPerToken(address lpToken) internal {
+        uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
+        uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
+        
+        if (totalSupply > 0 && timeDelta > 0) {
+            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+            uint256 pairRewards = (rewardPerSecond * timeDelta * pairs[lpToken].weight) / totalWeight;
+            rewardPerTokenStored[lpToken] += (pairRewards * PRECISION) / totalSupply;
+        }
+        
+        lastUpdateTime[lpToken] = block.timestamp;
+    }
+
+    function earned(address user, address lpToken) public view returns (uint256) {
+        UserStake storage stake = userStakes[user][lpToken];
+        uint256 currentRewardPerToken = rewardPerTokenStored[lpToken];
+        
+        if (block.timestamp > lastUpdateTime[lpToken] && IERC20(lpToken).balanceOf(address(this)) > 0) {
+            uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
+            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+            uint256 pairRewards = (rewardPerSecond * timeDelta * pairs[lpToken].weight) / totalWeight;
+            currentRewardPerToken += (pairRewards * PRECISION) / IERC20(lpToken).balanceOf(address(this));
+        }
+        
+        return stake.amount * (currentRewardPerToken - stake.rewardPerTokenPaid) / PRECISION + stake.pendingRewards;
     }
 
     function proposeAddPair(
@@ -337,6 +361,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             });
             activePairs.push(pa.pairToAdd);
             totalWeight += pa.weightToAdd;
+            lastUpdateTime[pa.pairToAdd] = block.timestamp;
             emit PairAdded(pa.pairToAdd, pa.platformToAdd, pa.weightToAdd);
         } else if (pa.actionType == ActionType.REMOVE_PAIR) {
             address lpToken = pa.pairToRemove;
@@ -397,10 +422,15 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(amount >= MIN_STAKE, "Stake amount too low");
         require(amount <= type(uint128).max, "Stake amount too high");
 
-        updateRewards(msg.sender, lpToken);
-
+        updateRewardPerToken(lpToken);
         UserStake storage userStake = userStakes[msg.sender][lpToken];
+        
+        if (userStake.amount > 0) {
+            userStake.pendingRewards = earned(msg.sender, lpToken);
+        }
+        
         userStake.amount += amount;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         userStake.lastRewardTime = uint64(block.timestamp);
 
         IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
@@ -414,15 +444,17 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         UserStake storage userStake = userStakes[msg.sender][lpToken];
         require(userStake.amount >= amount, "Insufficient stake");
 
-        updateRewards(msg.sender, lpToken);
-
-        uint256 rewards = userStake.pendingRewards;
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
         userStake.pendingRewards = 0;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
 
         if (amount == userStake.amount) {
             userStake.amount = 0;
             IERC20(lpToken).safeTransfer(msg.sender, amount);
-            rewardToken.safeTransfer(msg.sender, rewards);
+            if (rewards > 0) {
+                rewardToken.safeTransfer(msg.sender, rewards);
+            }
         } else {
             userStake.amount -= amount;
             IERC20(lpToken).safeTransfer(msg.sender, amount);
@@ -438,43 +470,23 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         LiquidityPair storage pair = pairs[lpToken];
         require(pair.isActive, "Pair not active");
 
-        updateRewards(msg.sender, lpToken);
-
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-        uint256 rewards = userStake.pendingRewards;
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
         require(rewards > 0, "No rewards to claim");
 
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
         userStake.pendingRewards = 0;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        
         rewardToken.safeTransfer(msg.sender, rewards);
-
         emit RewardsClaimed(msg.sender, lpToken, rewards);
     }
 
     function updateRewards(address user, address lpToken) internal {
+        updateRewardPerToken(lpToken);
         UserStake storage userStake = userStakes[user][lpToken];
-        LiquidityPair storage pair = pairs[lpToken];
-
-        if (userStake.amount > 0) {
-            uint256 timeElapsed = block.timestamp - userStake.lastRewardTime;
-            if (timeElapsed > 0 && totalWeight > 0) {
-                uint256 totalLPSupply = IERC20(lpToken).balanceOf(
-                    address(this)
-                );
-                if (totalLPSupply > 0) {
-                    uint256 rewardPerSecond = hourlyRewardRate /
-                        SECONDS_PER_HOUR;
-                    uint256 pairRewards = (rewardPerSecond *
-                        timeElapsed *
-                        pair.weight) / totalWeight;
-                    uint256 rewards = (pairRewards * userStake.amount) /
-                        (totalLPSupply * PRECISION);
-
-                    if (rewards > 0 && rewards < type(uint128).max) {
-                        userStake.pendingRewards += uint128(rewards);
-                    }
-                }
-            }
-        }
+        userStake.pendingRewards = earned(user, lpToken);
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         userStake.lastRewardTime = uint64(block.timestamp);
     }
 
@@ -526,10 +538,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         view
         returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
     {
+        UserStake storage stake = userStakes[user][lpToken];
         return (
-            userStakes[user][lpToken].amount,
-            userStakes[user][lpToken].pendingRewards,
-            userStakes[user][lpToken].lastRewardTime
+            stake.amount,
+            earned(user, lpToken),
+            stake.lastRewardTime
         );
     }
 
