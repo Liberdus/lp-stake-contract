@@ -19,6 +19,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public constant MAX_PAIRS = 100;
     uint256 public constant REQUIRED_APPROVALS = 3;
     uint256 private constant SECONDS_PER_HOUR = 3600;
+    uint256 private constant ACTION_EXPIRY = 7 days; // Actions expire after 7 days
 
     // Structs
     struct LiquidityPair {
@@ -59,6 +60,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         bool executed;
         uint8 approvals;
         address[] approvedBy;
+        uint256 proposedTime; // Timestamp when action was proposed
     }
 
     // State variables
@@ -89,6 +91,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     );
     event ActionApproved(uint256 actionId, address approver);
     event ActionExecuted(uint256 actionId);
+    event ActionExpired(uint256 actionId);
     event RewardsWithdrawn(address recipient, uint256 amount);
 
     constructor(address _rewardToken, address[] memory _initialSigners) {
@@ -96,11 +99,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             _initialSigners.length == TOTAL_SIGNERS,
             "Must provide exactly 4 signers"
         );
+        require(_rewardToken != address(0), "Invalid reward token address");
         rewardToken = IERC20(_rewardToken);
         signers = _initialSigners;
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         for (uint i = 0; i < _initialSigners.length; i++) {
+            require(_initialSigners[i] != address(0), "Invalid signer address");
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
         }
     }
@@ -130,12 +135,18 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(recipient != address(0), "Invalid recipient address");
         require(amount > 0, "Amount must be greater than zero");
+        require(
+            amount <= rewardToken.balanceOf(address(this)),
+            "Amount exceeds contract balance"
+        );
+        require(amount <= type(uint128).max, "Amount too large");
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.WITHDRAW_REWARDS;
         pa.recipient = recipient;
         pa.withdrawAmount = amount;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(
             actionCounter,
@@ -149,11 +160,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function proposeSetHourlyRewardRate(
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
+        require(newRate <= type(uint128).max, "Rate too high");
         updateAllRewards();
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
         pa.newHourlyRewardRate = newRate;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(
             actionCounter,
@@ -169,12 +182,21 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256[] calldata weights
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpTokens.length == weights.length, "Array lengths must match");
+        require(lpTokens.length > 0, "Empty arrays not allowed");
+        require(lpTokens.length <= MAX_PAIRS, "Too many pairs");
+        
+        for(uint i = 0; i < weights.length; i++) {
+            require(weights[i] <= MAX_WEIGHT, "Weight exceeds maximum");
+            require(lpTokens[i] != address(0), "Invalid LP token address");
+        }
+
         updateAllRewards();
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.UPDATE_PAIR_WEIGHTS;
         pa.pairs = lpTokens;
         pa.weights = weights;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(
             actionCounter,
@@ -206,6 +228,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 weight
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpToken != address(0), "Invalid pair");
+        require(weight > 0, "Weight must be greater than 0");
+        require(weight <= MAX_WEIGHT, "Weight exceeds maximum");
+        require(bytes(pairName).length > 0, "Empty pair name");
+        require(bytes(pairName).length <= 32, "Pair name too long");
+        require(bytes(platform).length > 0, "Empty platform name");
+        require(bytes(platform).length <= 32, "Platform name too long");
+
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.ADD_PAIR;
@@ -213,6 +242,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         pa.pairNameToAdd = pairName;
         pa.platformToAdd = platform;
         pa.weightToAdd = weight;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(actionCounter, msg.sender, ActionType.ADD_PAIR);
         _approveActionInternal(actionCounter);
@@ -222,12 +252,14 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function proposeRemovePair(
         address lpToken
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
+        require(lpToken != address(0), "Invalid pair address");
         require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.REMOVE_PAIR;
         pa.pairToRemove = lpToken;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
         _approveActionInternal(actionCounter);
@@ -242,6 +274,10 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function _approveActionInternal(uint256 actionId) internal {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
+        require(
+            block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
+            "Action has expired"
+        );
 
         // Check if already approved
         for (uint i = 0; i < pa.approvedBy.length; i++) {
@@ -258,6 +294,10 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
         require(pa.approvals >= REQUIRED_APPROVALS, "Not enough approvals");
+        require(
+            block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
+            "Action has expired"
+        );
 
         if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE) {
             hourlyRewardRate = pa.newHourlyRewardRate;
@@ -451,6 +491,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         pa.actionType = ActionType.CHANGE_SIGNER;
         pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
         pa.pairToRemove = newSigner;
+        pa.proposedTime = block.timestamp;
 
         emit ActionProposed(
             actionCounter,
