@@ -12,8 +12,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     // Constants
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     uint256 public constant PRECISION = 1e18;
-    uint256 public constant MIN_SIGNERS = 3;
-    uint256 public constant TOTAL_SIGNERS = 4;
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
     uint256 public constant MAX_PAIRS = 100;
@@ -63,6 +61,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint8 approvals;
         address[] approvedBy;
         uint256 proposedTime; // Timestamp when action was proposed
+        bool rejected;
     }
 
     // State variables
@@ -98,12 +97,10 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event ActionExecuted(uint256 actionId);
     event ActionExpired(uint256 actionId);
     event RewardsWithdrawn(address recipient, uint256 amount);
+    event ActionRejected(uint256 actionId, address rejecter);
 
     constructor(address _rewardToken, address[] memory _initialSigners) {
-        require(
-            _initialSigners.length == TOTAL_SIGNERS,
-            "Must provide exactly 4 signers"
-        );
+        require(_initialSigners.length == 4, "Must provide exactly 4 signers");
         require(_rewardToken != address(0), "Invalid reward token address");
         rewardToken = IERC20(_rewardToken);
         signers = _initialSigners;
@@ -347,6 +344,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
         require(!pa.expired, "Action has expired");
+        require(!pa.rejected, "Action was rejected");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
@@ -367,6 +365,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
         require(!pa.expired, "Action has expired");
+        require(!pa.rejected, "Action was rejected");
         require(pa.approvals >= REQUIRED_APPROVALS, "Not enough approvals");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
@@ -642,5 +641,24 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             }
         }
         return stakesArray;
+    }
+
+    function rejectAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        PendingAction storage pa = actions[actionId];
+        require(!pa.executed, "Already executed");
+        require(!pa.expired, "Action has expired");
+        require(!pa.rejected, "Already rejected");
+        require(
+            block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
+            "Action has expired"
+        );
+
+        for (uint i = 0; i < pa.approvedBy.length; i++) {
+            require(pa.approvedBy[i] != msg.sender, "Cannot reject after approving");
+        }
+
+        pa.rejected = true;
+        emit ActionRejected(actionId, msg.sender);
     }
 }
