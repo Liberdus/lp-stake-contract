@@ -21,11 +21,12 @@ const LPStakingModule = buildModule('LPStakingModule', (m) => {
 
   const lpStaking = m.contract('LPStaking', [libToken, INITIAL_SIGNERS], { id: 'LPStaking' });
 
-  // Mint LIB tokens to LPStaking
+  // Mint LIB tokens to LPStaking Contract
   m.call(libToken, 'mint', [lpStaking, parseEther('10000')], { id: 'Mint_LIB_To_LPStaking' });
 
   // Mint LP tokens to signers
   INITIAL_SIGNERS.forEach((signerAddress, index) => {
+    m.call(libToken, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LIB_To_${signerAddress}` });
     m.call(lpLIBETH, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBETH_${index}` });
     m.call(lpLIBUSDT, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBUSDT_${index}` });
     m.call(lpLIBUSDC, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBUSDC_${index}` });
