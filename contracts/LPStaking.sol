@@ -392,6 +392,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                     "Pair doesn't exist"
                 );
                 pairs[pa.pairs[i]].weight = pa.weights[i];
+                pairs[pa.pairs[i]].isActive = pa.weights[i] > 0;
             }
             for (uint j = 0; j < activePairs.length; j++) {
                 totalWeight += pairs[activePairs[j]].weight;
