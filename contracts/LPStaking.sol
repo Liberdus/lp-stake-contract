@@ -401,11 +401,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             require(pairs[lpToken].isActive, "Pair not active");
 
             totalWeight -= pairs[lpToken].weight;
-
-            pairs[lpToken].isActive = false;
             pairs[lpToken].weight = 0;
 
-            _removeActivePair(lpToken);
+            // Only fully remove the pair if TVL is zero
+            if (IERC20(lpToken).balanceOf(address(this)) == 0) {
+                pairs[lpToken].isActive = false;
+                _removeActivePair(lpToken);
+            }
 
             emit PairRemoved(lpToken);
         } else if (pa.actionType == ActionType.CHANGE_SIGNER) {
