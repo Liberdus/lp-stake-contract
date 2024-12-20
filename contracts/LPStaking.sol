@@ -242,7 +242,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function updateAllRewards() internal {
         for (uint i = 0; i < activePairs.length; i++) {
             address lpToken = activePairs[i];
-            updateRewardPerToken(lpToken);
+            if (pairs[lpToken].isActive) {
+                updateRewardPerToken(lpToken);
+            }
         }
     }
 
