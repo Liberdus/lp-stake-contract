@@ -192,7 +192,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(newRate <= type(uint128).max, "Rate too high");
-        updateAllRewards();
+        
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
@@ -221,7 +221,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             require(lpTokens[i] != address(0), "Invalid LP token address");
         }
 
-        updateAllRewards();
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.UPDATE_PAIR_WEIGHTS;
@@ -351,6 +350,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
         );
+
+        if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE ||
+            pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS) {
+            updateAllRewards();
+        }
 
         if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE) {
             hourlyRewardRate = pa.newHourlyRewardRate;
