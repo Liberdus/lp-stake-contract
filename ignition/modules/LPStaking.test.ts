@@ -26,6 +26,7 @@ const LPStakingModule = buildModule('LPStakingModule', (m) => {
 
   // Mint LP tokens to signers
   INITIAL_SIGNERS.forEach((signerAddress, index) => {
+    m.call(libToken, 'mint', [signerAddress, parseEther('10000')], { id: `Mint_LIB_To_${signerAddress}` });
     m.call(lpLIBETH, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBETH_${index}` });
     m.call(lpLIBUSDT, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBUSDT_${index}` });
     m.call(lpLIBUSDC, 'mint', [signerAddress, parseEther('100')], { id: `Mint_LP_LIBUSDC_${index}` });
