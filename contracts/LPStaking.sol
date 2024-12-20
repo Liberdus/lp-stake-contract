@@ -518,6 +518,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         } else {
             userStake.amount -= amount;
             IERC20(lpToken).safeTransfer(msg.sender, amount);
+            if (rewards > 0) {
+                rewardToken.safeTransfer(msg.sender, rewards);
+            }
         }
 
         emit StakeRemoved(msg.sender, lpToken, amount);
