@@ -139,7 +139,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return block.timestamp > pa.proposedTime + ACTION_EXPIRY;
     }
 
-    function handleExpiredAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+    function handleExpiredAction(
+        uint256 actionId
+    ) external onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Action already executed");
@@ -151,9 +153,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     }
 
     function cleanupExpiredActions() external onlyRole(ADMIN_ROLE) {
-        for(uint256 i = 1; i <= actionCounter; i++) {
+        for (uint256 i = 1; i <= actionCounter; i++) {
             PendingAction storage pa = actions[i];
-            if(!pa.executed && !pa.expired && isActionExpired(i)) {
+            if (!pa.executed && !pa.expired && isActionExpired(i)) {
                 pa.expired = true;
                 emit ActionExpired(i);
             }
@@ -192,7 +194,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(newRate <= type(uint128).max, "Rate too high");
-        
+
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
@@ -215,8 +217,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(lpTokens.length == weights.length, "Array lengths must match");
         require(lpTokens.length > 0, "Empty arrays not allowed");
         require(lpTokens.length <= MAX_PAIRS, "Too many pairs");
-        
-        for(uint i = 0; i < weights.length; i++) {
+
+        for (uint i = 0; i < weights.length; i++) {
             require(weights[i] <= MAX_WEIGHT, "Weight exceeds maximum");
             require(lpTokens[i] != address(0), "Invalid LP token address");
         }
@@ -247,28 +249,46 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     function updateRewardPerToken(address lpToken) internal {
         uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
         uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-        
+
         if (totalSupply > 0 && timeDelta > 0) {
             uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond * timeDelta * pairs[lpToken].weight) / totalWeight;
-            rewardPerTokenStored[lpToken] += (pairRewards * PRECISION) / totalSupply;
+            uint256 pairRewards = (rewardPerSecond *
+                timeDelta *
+                pairs[lpToken].weight) / totalWeight;
+            rewardPerTokenStored[lpToken] +=
+                (pairRewards * PRECISION) /
+                totalSupply;
         }
-        
+
         lastUpdateTime[lpToken] = block.timestamp;
     }
 
-    function earned(address user, address lpToken) public view returns (uint256) {
+    function earned(
+        address user,
+        address lpToken
+    ) public view returns (uint256) {
         UserStake storage stake = userStakes[user][lpToken];
         uint256 currentRewardPerToken = rewardPerTokenStored[lpToken];
-        
-        if (block.timestamp > lastUpdateTime[lpToken] && IERC20(lpToken).balanceOf(address(this)) > 0) {
+
+        if (
+            block.timestamp > lastUpdateTime[lpToken] &&
+            IERC20(lpToken).balanceOf(address(this)) > 0
+        ) {
             uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
             uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond * timeDelta * pairs[lpToken].weight) / totalWeight;
-            currentRewardPerToken += (pairRewards * PRECISION) / IERC20(lpToken).balanceOf(address(this));
+            uint256 pairRewards = (rewardPerSecond *
+                timeDelta *
+                pairs[lpToken].weight) / totalWeight;
+            currentRewardPerToken +=
+                (pairRewards * PRECISION) /
+                IERC20(lpToken).balanceOf(address(this));
         }
-        
-        return stake.amount * (currentRewardPerToken - stake.rewardPerTokenPaid) / PRECISION + stake.pendingRewards;
+
+        return
+            (stake.amount *
+                (currentRewardPerToken - stake.rewardPerTokenPaid)) /
+            PRECISION +
+            stake.pendingRewards;
     }
 
     function proposeAddPair(
@@ -351,8 +371,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             "Action has expired"
         );
 
-        if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE ||
-            pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS) {
+        if (
+            pa.actionType == ActionType.SET_HOURLY_REWARD_RATE ||
+            pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS ||
+            pa.actionType == ActionType.REMOVE_PAIR
+        ) {
             updateAllRewards();
         }
 
@@ -459,11 +482,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         updateRewardPerToken(lpToken);
         UserStake storage userStake = userStakes[msg.sender][lpToken];
-        
+
         if (userStake.amount > 0) {
             userStake.pendingRewards = earned(msg.sender, lpToken);
         }
-        
+
         userStake.amount += amount;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         userStake.lastRewardTime = uint64(block.timestamp);
@@ -512,7 +535,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         UserStake storage userStake = userStakes[msg.sender][lpToken];
         userStake.pendingRewards = 0;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-        
+
         rewardToken.safeTransfer(msg.sender, rewards);
         emit RewardsClaimed(msg.sender, lpToken, rewards);
     }
@@ -574,11 +597,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
     {
         UserStake storage stake = userStakes[user][lpToken];
-        return (
-            stake.amount,
-            earned(user, lpToken),
-            stake.lastRewardTime
-        );
+        return (stake.amount, earned(user, lpToken), stake.lastRewardTime);
     }
 
     function getActivePairs() external view returns (address[] memory) {
