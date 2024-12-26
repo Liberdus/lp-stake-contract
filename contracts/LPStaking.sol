@@ -249,7 +249,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
         uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
 
-        if (totalSupply > 0 && timeDelta > 0) {
+        if (totalSupply > 0 && timeDelta > 0 && totalWeight > 0) {
             uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
             uint256 pairRewards = (rewardPerSecond *
                 timeDelta *
@@ -271,7 +271,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         if (
             block.timestamp > lastUpdateTime[lpToken] &&
-            IERC20(lpToken).balanceOf(address(this)) > 0
+            IERC20(lpToken).balanceOf(address(this)) > 0 &&
+            totalWeight > 0
         ) {
             uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
             uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
