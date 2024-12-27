@@ -9,7 +9,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 contract LPStaking is ReentrancyGuard, AccessControl {
     using SafeERC20 for IERC20;
 
-    // Constants
+    // ============ Constants ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
@@ -19,7 +19,17 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 private constant SECONDS_PER_HOUR = 3600;
     uint256 private constant ACTION_EXPIRY = 7 days; // Actions expire after 7 days
 
-    // Structs
+    // ============ Enums ============
+    enum ActionType {
+        SET_HOURLY_REWARD_RATE,
+        UPDATE_PAIR_WEIGHTS,
+        ADD_PAIR,
+        REMOVE_PAIR,
+        CHANGE_SIGNER,
+        WITHDRAW_REWARDS
+    }
+
+    // ============ Structs ============
     struct LiquidityPair {
         IERC20 lpToken;
         string pairName;
@@ -33,15 +43,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         uint256 lastRewardTime;
         uint256 pendingRewards;
         uint256 rewardPerTokenPaid;
-    }
-
-    enum ActionType {
-        SET_HOURLY_REWARD_RATE,
-        UPDATE_PAIR_WEIGHTS,
-        ADD_PAIR,
-        REMOVE_PAIR,
-        CHANGE_SIGNER,
-        WITHDRAW_REWARDS
     }
 
     struct PendingAction {
@@ -64,7 +65,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         bool rejected;
     }
 
-    // State variables
+    // ============ State Variables ============
+    // Core state
     IERC20 public rewardToken;
     uint256 public hourlyRewardRate;
     mapping(address => LiquidityPair) public pairs;
@@ -72,14 +74,14 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     address[] public activePairs;
     address[] public signers;
 
-    // Reward tracking
+    // Reward tracking state
     mapping(address => uint256) public rewardPerTokenStored;
     mapping(address => uint256) public lastUpdateTime;
     uint256 public totalWeight;
     uint256 public actionCounter;
     mapping(uint256 => PendingAction) public actions;
 
-    // Events
+    // ============ Events ============
     event PairAdded(address lpToken, string platform, uint256 weight);
     event PairRemoved(address lpToken);
     event StakeAdded(address user, address lpToken, uint256 amount);
@@ -99,6 +101,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event RewardsWithdrawn(address recipient, uint256 amount);
     event ActionRejected(uint256 actionId, address rejecter);
 
+    // ============ Constructor ============
     constructor(address _rewardToken, address[] memory _initialSigners) {
         require(_initialSigners.length == 4, "Must provide exactly 4 signers");
         require(_rewardToken != address(0), "Invalid reward token address");
@@ -112,7 +115,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
     }
 
-    // Add getter functions for array data in PendingAction
+    // ============ View Functions ============
     function getActionPairs(
         uint256 actionId
     ) external view returns (address[] memory) {
@@ -136,6 +139,174 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return block.timestamp > pa.proposedTime + ACTION_EXPIRY;
     }
 
+    function earned(
+        address user,
+        address lpToken
+    ) public view returns (uint256) {
+        UserStake storage stake = userStakes[user][lpToken];
+        uint256 currentRewardPerToken = rewardPerTokenStored[lpToken];
+
+        if (
+            block.timestamp > lastUpdateTime[lpToken] &&
+            IERC20(lpToken).balanceOf(address(this)) > 0 &&
+            totalWeight > 0
+        ) {
+            uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
+            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+            uint256 pairRewards = (rewardPerSecond *
+                timeDelta *
+                pairs[lpToken].weight) / totalWeight;
+            currentRewardPerToken +=
+                (pairRewards * PRECISION) /
+                IERC20(lpToken).balanceOf(address(this));
+        }
+
+        return
+            (stake.amount *
+                (currentRewardPerToken - stake.rewardPerTokenPaid)) /
+            PRECISION +
+            stake.pendingRewards;
+    }
+
+    function getPairInfo(
+        address lpToken
+    )
+        external
+        view
+        returns (
+            IERC20 token,
+            string memory platform,
+            uint256 weight,
+            bool isActive
+        )
+    {
+        LiquidityPair storage pair = pairs[lpToken];
+        return (pair.lpToken, pair.platform, pair.weight, pair.isActive);
+    }
+
+    function getUserStakeInfo(
+        address user,
+        address lpToken
+    )
+        external
+        view
+        returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
+    {
+        UserStake storage stake = userStakes[user][lpToken];
+        return (stake.amount, earned(user, lpToken), stake.lastRewardTime);
+    }
+
+    function getActivePairs() external view returns (address[] memory) {
+        return activePairs;
+    }
+
+    function getSigners() external view returns (address[] memory) {
+        return signers;
+    }
+
+    function getPairs() external view returns (LiquidityPair[] memory) {
+        LiquidityPair[] memory pairsArray = new LiquidityPair[](
+            activePairs.length
+        );
+        for (uint i = 0; i < activePairs.length; i++) {
+            pairsArray[i] = pairs[activePairs[i]];
+        }
+        return pairsArray;
+    }
+
+    function getUserStakes(
+        address user
+    ) external view returns (UserStake[] memory) {
+        uint256 stakeCount = 0;
+        for (uint i = 0; i < activePairs.length; i++) {
+            if (userStakes[user][activePairs[i]].amount > 0) {
+                stakeCount++;
+            }
+        }
+
+        UserStake[] memory stakesArray = new UserStake[](stakeCount);
+        uint256 index = 0;
+        for (uint i = 0; i < activePairs.length; i++) {
+            if (userStakes[user][activePairs[i]].amount > 0) {
+                stakesArray[index] = userStakes[user][activePairs[i]];
+                index++;
+            }
+        }
+        return stakesArray;
+    }
+
+    // ============ User Actions ============
+    function stake(address lpToken, uint256 amount) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+        require(pair.weight > 0, "Pair has zero weight");
+        require(amount >= MIN_STAKE, "Stake amount too low");
+        require(amount <= type(uint128).max, "Stake amount too high");
+
+        updateRewardPerToken(lpToken);
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+
+        if (userStake.amount > 0) {
+            userStake.pendingRewards = earned(msg.sender, lpToken);
+        }
+
+        userStake.amount += amount;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        userStake.lastRewardTime = uint64(block.timestamp);
+
+        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
+        emit StakeAdded(msg.sender, lpToken, amount);
+    }
+
+    function unstake(address lpToken, uint256 amount) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        require(userStake.amount >= amount, "Insufficient stake");
+
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
+        userStake.pendingRewards = 0;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+
+        if (amount == userStake.amount) {
+            userStake.amount = 0;
+            IERC20(lpToken).safeTransfer(msg.sender, amount);
+            if (rewards > 0) {
+                rewardToken.safeTransfer(msg.sender, rewards);
+            }
+        } else {
+            userStake.amount -= amount;
+            IERC20(lpToken).safeTransfer(msg.sender, amount);
+            if (rewards > 0) {
+                rewardToken.safeTransfer(msg.sender, rewards);
+            }
+        }
+
+        emit StakeRemoved(msg.sender, lpToken, amount);
+        if (rewards > 0) {
+            emit RewardsClaimed(msg.sender, lpToken, rewards);
+        }
+    }
+
+    function claimRewards(address lpToken) external nonReentrant {
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
+        require(rewards > 0, "No rewards to claim");
+
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        userStake.pendingRewards = 0;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+
+        rewardToken.safeTransfer(msg.sender, rewards);
+        emit RewardsClaimed(msg.sender, lpToken, rewards);
+    }
+
+    // ============ Admin Actions ============
     function handleExpiredAction(
         uint256 actionId
     ) external onlyRole(ADMIN_ROLE) {
@@ -236,60 +407,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
-    function updateAllRewards() internal {
-        for (uint i = 0; i < activePairs.length; i++) {
-            address lpToken = activePairs[i];
-            if (pairs[lpToken].isActive) {
-                updateRewardPerToken(lpToken);
-            }
-        }
-    }
-
-    function updateRewardPerToken(address lpToken) internal {
-        uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
-        uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-
-        if (totalSupply > 0 && timeDelta > 0) {
-            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond *
-                timeDelta *
-                pairs[lpToken].weight) / totalWeight;
-            rewardPerTokenStored[lpToken] +=
-                (pairRewards * PRECISION) /
-                totalSupply;
-        }
-
-        lastUpdateTime[lpToken] = block.timestamp;
-    }
-
-    function earned(
-        address user,
-        address lpToken
-    ) public view returns (uint256) {
-        UserStake storage stake = userStakes[user][lpToken];
-        uint256 currentRewardPerToken = rewardPerTokenStored[lpToken];
-
-        if (
-            block.timestamp > lastUpdateTime[lpToken] &&
-            IERC20(lpToken).balanceOf(address(this)) > 0
-        ) {
-            uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond *
-                timeDelta *
-                pairs[lpToken].weight) / totalWeight;
-            currentRewardPerToken +=
-                (pairRewards * PRECISION) /
-                IERC20(lpToken).balanceOf(address(this));
-        }
-
-        return
-            (stake.amount *
-                (currentRewardPerToken - stake.rewardPerTokenPaid)) /
-            PRECISION +
-            stake.pendingRewards;
-    }
-
     function proposeAddPair(
         address lpToken,
         string calldata pairName,
@@ -335,29 +452,33 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
+    function proposeChangeSigner(
+        address oldSigner,
+        address newSigner
+    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
+        require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
+        require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
+        require(newSigner != address(0), "Invalid new signer");
+
+        actionCounter++;
+        PendingAction storage pa = actions[actionCounter];
+        pa.actionType = ActionType.CHANGE_SIGNER;
+        pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
+        pa.pairToRemove = newSigner;
+        pa.proposedTime = block.timestamp;
+
+        emit ActionProposed(
+            actionCounter,
+            msg.sender,
+            ActionType.CHANGE_SIGNER
+        );
+        _approveActionInternal(actionCounter);
+        return actionCounter;
+    }
+
     function approveAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         _approveActionInternal(actionId);
-    }
-
-    function _approveActionInternal(uint256 actionId) internal {
-        PendingAction storage pa = actions[actionId];
-        require(!pa.executed, "Already executed");
-        require(!pa.expired, "Action has expired");
-        require(!pa.rejected, "Action was rejected");
-        require(
-            block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
-            "Action has expired"
-        );
-
-        // Check if already approved
-        for (uint i = 0; i < pa.approvedBy.length; i++) {
-            require(pa.approvedBy[i] != msg.sender, "Already approved");
-        }
-
-        pa.approvedBy.push(msg.sender);
-        pa.approvals++;
-        emit ActionApproved(actionId, msg.sender);
     }
 
     function executeAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
@@ -464,186 +585,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         emit ActionExecuted(actionId);
     }
 
-    function _removeActivePair(address lpToken) internal {
-        uint256 length = activePairs.length;
-        for (uint256 i = 0; i < length; i++) {
-            if (activePairs[i] == lpToken) {
-                activePairs[i] = activePairs[length - 1];
-                activePairs.pop();
-                break;
-            }
-        }
-    }
-
-    function stake(address lpToken, uint256 amount) external nonReentrant {
-        LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
-        require(pair.weight > 0, "Pair has zero weight");
-        require(amount >= MIN_STAKE, "Stake amount too low");
-        require(amount <= type(uint128).max, "Stake amount too high");
-
-        updateRewardPerToken(lpToken);
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-
-        if (userStake.amount > 0) {
-            userStake.pendingRewards = earned(msg.sender, lpToken);
-        }
-
-        userStake.amount += amount;
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-        userStake.lastRewardTime = uint64(block.timestamp);
-
-        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
-        emit StakeAdded(msg.sender, lpToken, amount);
-    }
-
-    function unstake(address lpToken, uint256 amount) external nonReentrant {
-        LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
-
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-        require(userStake.amount >= amount, "Insufficient stake");
-
-        updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
-        userStake.pendingRewards = 0;
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-
-        if (amount == userStake.amount) {
-            userStake.amount = 0;
-            IERC20(lpToken).safeTransfer(msg.sender, amount);
-            if (rewards > 0) {
-                rewardToken.safeTransfer(msg.sender, rewards);
-            }
-        } else {
-            userStake.amount -= amount;
-            IERC20(lpToken).safeTransfer(msg.sender, amount);
-            if (rewards > 0) {
-                rewardToken.safeTransfer(msg.sender, rewards);
-            }
-        }
-
-        emit StakeRemoved(msg.sender, lpToken, amount);
-        if (rewards > 0) {
-            emit RewardsClaimed(msg.sender, lpToken, rewards);
-        }
-    }
-
-    function claimRewards(address lpToken) external nonReentrant {
-        LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
-
-        updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
-        require(rewards > 0, "No rewards to claim");
-
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-        userStake.pendingRewards = 0;
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-
-        rewardToken.safeTransfer(msg.sender, rewards);
-        emit RewardsClaimed(msg.sender, lpToken, rewards);
-    }
-
-    function updateRewards(address user, address lpToken) internal {
-        updateRewardPerToken(lpToken);
-        UserStake storage userStake = userStakes[user][lpToken];
-        userStake.pendingRewards = earned(user, lpToken);
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-        userStake.lastRewardTime = uint64(block.timestamp);
-    }
-
-    function proposeChangeSigner(
-        address oldSigner,
-        address newSigner
-    ) external onlyRole(ADMIN_ROLE) returns (uint256) {
-        require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
-        require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
-        require(newSigner != address(0), "Invalid new signer");
-
-        actionCounter++;
-        PendingAction storage pa = actions[actionCounter];
-        pa.actionType = ActionType.CHANGE_SIGNER;
-        pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
-        pa.pairToRemove = newSigner;
-        pa.proposedTime = block.timestamp;
-
-        emit ActionProposed(
-            actionCounter,
-            msg.sender,
-            ActionType.CHANGE_SIGNER
-        );
-        _approveActionInternal(actionCounter);
-        return actionCounter;
-    }
-
-    function getPairInfo(
-        address lpToken
-    )
-        external
-        view
-        returns (
-            IERC20 token,
-            string memory platform,
-            uint256 weight,
-            bool isActive
-        )
-    {
-        LiquidityPair storage pair = pairs[lpToken];
-        return (pair.lpToken, pair.platform, pair.weight, pair.isActive);
-    }
-
-    function getUserStakeInfo(
-        address user,
-        address lpToken
-    )
-        external
-        view
-        returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
-    {
-        UserStake storage stake = userStakes[user][lpToken];
-        return (stake.amount, earned(user, lpToken), stake.lastRewardTime);
-    }
-
-    function getActivePairs() external view returns (address[] memory) {
-        return activePairs;
-    }
-
-    function getSigners() external view returns (address[] memory) {
-        return signers;
-    }
-
-    function getPairs() external view returns (LiquidityPair[] memory) {
-        LiquidityPair[] memory pairsArray = new LiquidityPair[](
-            activePairs.length
-        );
-        for (uint i = 0; i < activePairs.length; i++) {
-            pairsArray[i] = pairs[activePairs[i]];
-        }
-        return pairsArray;
-    }
-
-    function getUserStakes(
-        address user
-    ) external view returns (UserStake[] memory) {
-        uint256 stakeCount = 0;
-        for (uint i = 0; i < activePairs.length; i++) {
-            if (userStakes[user][activePairs[i]].amount > 0) {
-                stakeCount++;
-            }
-        }
-
-        UserStake[] memory stakesArray = new UserStake[](stakeCount);
-        uint256 index = 0;
-        for (uint i = 0; i < activePairs.length; i++) {
-            if (userStakes[user][activePairs[i]].amount > 0) {
-                stakesArray[index] = userStakes[user][activePairs[i]];
-                index++;
-            }
-        }
-        return stakesArray;
-    }
-
     function rejectAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
@@ -656,10 +597,79 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         );
 
         for (uint i = 0; i < pa.approvedBy.length; i++) {
-            require(pa.approvedBy[i] != msg.sender, "Cannot reject after approving");
+            require(
+                pa.approvedBy[i] != msg.sender,
+                "Cannot reject after approving"
+            );
         }
 
         pa.rejected = true;
         emit ActionRejected(actionId, msg.sender);
+    }
+
+    // ============ Internal Functions ============
+    function updateAllRewards() internal {
+        for (uint i = 0; i < activePairs.length; i++) {
+            address lpToken = activePairs[i];
+            if (pairs[lpToken].isActive) {
+                updateRewardPerToken(lpToken);
+            }
+        }
+    }
+
+    function updateRewardPerToken(address lpToken) internal {
+        uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
+        uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
+
+        if (totalSupply > 0 && timeDelta > 0 && totalWeight > 0) {
+            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+            uint256 pairRewards = (rewardPerSecond *
+                timeDelta *
+                pairs[lpToken].weight) / totalWeight;
+            rewardPerTokenStored[lpToken] +=
+                (pairRewards * PRECISION) /
+                totalSupply;
+        }
+
+        lastUpdateTime[lpToken] = block.timestamp;
+    }
+
+    function updateRewards(address user, address lpToken) internal {
+        updateRewardPerToken(lpToken);
+        UserStake storage userStake = userStakes[user][lpToken];
+        userStake.pendingRewards = earned(user, lpToken);
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        userStake.lastRewardTime = uint64(block.timestamp);
+    }
+
+    function _approveActionInternal(uint256 actionId) internal {
+        PendingAction storage pa = actions[actionId];
+        require(!pa.executed, "Already executed");
+        require(!pa.expired, "Action has expired");
+        require(!pa.rejected, "Action was rejected");
+        require(
+            block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
+            "Action has expired"
+        );
+
+        // Check if already approved
+        for (uint i = 0; i < pa.approvedBy.length; i++) {
+            require(pa.approvedBy[i] != msg.sender, "Already approved");
+        }
+
+        pa.approvedBy.push(msg.sender);
+        pa.approvals++;
+        emit ActionApproved(actionId, msg.sender);
+    }
+
+    function _removeActivePair(address lpToken) internal {
+        uint256 length = activePairs.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (activePairs[i] == lpToken) {
+                activePairs[i] = activePairs[length - 1];
+                activePairs.pop();
+                break;
+            }
+        }
     }
 }
