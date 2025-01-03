@@ -552,6 +552,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             // Only fully remove the pair if TVL is zero
             if (IERC20(lpToken).balanceOf(address(this)) == 0) {
                 pairs[lpToken].isActive = false;
+                pairs[lpToken].lpToken = IERC20(address(0));
                 _removeActivePair(lpToken);
             }
 
