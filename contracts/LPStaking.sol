@@ -11,6 +11,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     // ============ Constants ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant OWNER_APPROVER_ROLE = keccak256("OWNER_APPROVER_ROLE");
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
@@ -108,7 +109,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         rewardToken = IERC20(_rewardToken);
         signers = _initialSigners;
 
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(OWNER_APPROVER_ROLE, msg.sender);
         for (uint i = 0; i < _initialSigners.length; i++) {
             require(_initialSigners[i] != address(0), "Invalid signer address");
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
@@ -476,8 +477,19 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return actionCounter;
     }
 
-    function approveAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+
+    function approveAction(uint256 actionId) external {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        
+        PendingAction storage pa = actions[actionId];
+        if (pa.actionType == ActionType.CHANGE_SIGNER) {
+            require(
+                hasRole(ADMIN_ROLE, msg.sender) || hasRole(OWNER_APPROVER_ROLE, msg.sender),
+                "Caller must have ADMIN_ROLE or OWNER_APPROVER_ROLE"
+            );
+        } else {
+            require(hasRole(ADMIN_ROLE, msg.sender), "Caller must have ADMIN_ROLE");
+        }
         _approveActionInternal(actionId);
     }
 
