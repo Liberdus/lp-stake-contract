@@ -506,6 +506,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         );
 
         if (
+            pa.actionType == ActionType.ADD_PAIR ||
             pa.actionType == ActionType.SET_HOURLY_REWARD_RATE ||
             pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS ||
             pa.actionType == ActionType.REMOVE_PAIR
@@ -525,7 +526,6 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                     "Pair doesn't exist"
                 );
                 pairs[pa.pairs[i]].weight = pa.weights[i];
-                pairs[pa.pairs[i]].isActive = pa.weights[i] > 0;
             }
             for (uint j = 0; j < activePairs.length; j++) {
                 totalWeight += pairs[activePairs[j]].weight;
