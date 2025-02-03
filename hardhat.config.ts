@@ -33,6 +33,11 @@ const config: HardhatUserConfig = {
         mnemonic: "test test test test test test test test test test test junk",
       },
     },
+    hardhat: {
+      accounts: {
+        count: 10, // Default is 20, adjust as needed
+      }
+    },
   },
   etherscan: {
     apiKey: process.env.POLYGONSCAN_API_KEY!,
