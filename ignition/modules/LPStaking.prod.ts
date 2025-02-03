@@ -4,16 +4,15 @@
 import { buildModule } from '@nomicfoundation/hardhat-ignition/modules';
 
 const LPStakingModule = buildModule('LPStakingModule', (m) => {
-  const libToken = '0xeC122D3edADd8e5AA5cD97Dc2a541329D027d66A';
+  const libToken = '0x693ed886545970F0a3ADf8C59af5cCdb6dDF0a76';
   const INITIAL_SIGNERS = [
-    '0xeC122D3edADd8e5AA5cD97Dc2a541329D027d66A',
-    '0xdD2FD4581271e230360230F9337D5c0430Bf44C0',
-    '0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199',
-    '0xbDA5747bFD65F08deb54cb465eB87D40e51B197E',
+    '0xb5A5bD462A0a76c02990d0FBE3321e92E0B03ABC',
+    '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
+    '0x32B6f2C027D4c9D99Ca07d047D17987390a5EB39',
+    '0xEc33aDc8A175DCc44f809909B9aae9F4F5760818',
   ];
 
   const lpStaking = m.contract('LPStaking', [libToken, INITIAL_SIGNERS], { id: 'LPStaking' });
-
   return { lpStaking };
 });
 
