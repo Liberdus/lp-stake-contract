@@ -84,7 +84,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     // ============ Events ============
     event PairAdded(address lpToken, string platform, uint256 weight);
-    event PairRemoved(address lpToken);
+    event PairRemoved(address lpToken, string pairName);
     event StakeAdded(address user, address lpToken, uint256 amount);
     event StakeRemoved(address user, address lpToken, uint256 amount);
     event RewardsClaimed(address user, address lpToken, uint256 amount);
@@ -447,6 +447,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         pa.actionType = ActionType.REMOVE_PAIR;
         pa.pairToRemove = lpToken;
         pa.proposedTime = block.timestamp;
+        pa.pairNameToAdd = pairs[lpToken].pairName; // Reusing field for event info
 
         emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
         _approveActionInternal(actionCounter);
@@ -568,7 +569,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
                 _removeActivePair(lpToken);
             }
 
-            emit PairRemoved(lpToken);
+            emit PairRemoved(lpToken, pa.pairNameToAdd);
         } else if (pa.actionType == ActionType.CHANGE_SIGNER) {
             address oldSigner = pa.pairToAdd;
             address newSigner = pa.pairToRemove;
