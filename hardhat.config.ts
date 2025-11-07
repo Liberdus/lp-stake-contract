@@ -1,4 +1,5 @@
 import { HardhatUserConfig } from 'hardhat/config';
+import '@nomicfoundation/hardhat-ignition-ethers';
 import '@nomicfoundation/hardhat-verify';
 import dotenv from 'dotenv';
 dotenv.config();

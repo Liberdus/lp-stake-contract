@@ -1,7 +1,7 @@
 import { run } from "hardhat";
 
 async function main() {
-  const contractAddress = "0xef15eB728CEF704f40269319BBA495d4131Beb71";
+  const contractAddress = "0xCb36BeF8f079a0759DCC9F3988bC533F090Aa90c";
   const rewardToken = "0x693ed886545970F0a3ADf8C59af5cCdb6dDF0a76";
   const initialSigners = [
     "0xb5A5bD462A0a76c02990d0FBE3321e92E0B03ABC",
