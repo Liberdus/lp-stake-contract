@@ -1,5 +1,5 @@
 import { HardhatUserConfig } from 'hardhat/config';
-import '@nomicfoundation/hardhat-toolbox';
+import '@nomicfoundation/hardhat-verify';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -41,6 +41,9 @@ const config: HardhatUserConfig = {
   },
   etherscan: {
     apiKey: process.env.POLYGONSCAN_API_KEY!,
+  },
+  sourcify: {
+    enabled: false
   },
 };
 
