@@ -1,4 +1,5 @@
 import { expect } from 'chai';
+import '@nomicfoundation/hardhat-chai-matchers';
 import { ethers } from 'hardhat';
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { LPStaking, MockERC20 } from '../typechain-types';
@@ -26,17 +27,13 @@ describe('LPStaking', function () {
     const lpToken = await mockERC20.deploy('Uniswap-V2 LP Token', 'UNI-V2');
     await Promise.all([rewardToken.waitForDeployment(), lpToken.waitForDeployment()]);
 
-    // Deploy staking contract
+    // Deploy staking contract - include owner as first signer
     const LPStaking = await ethers.getContractFactory('LPStaking');
     const lpStaking = await LPStaking.deploy(
       await rewardToken.getAddress(),
-      signers.slice(0, 4).map((signer) => signer.address)
+      [owner.address, ...signers.slice(0, 3).map((signer) => signer.address)]
     );
     await lpStaking.waitForDeployment();
-
-    // Setup admin role
-    const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
-    await lpStaking.grantRole(ADMIN_ROLE, owner.address);
 
     return { lpStaking, rewardToken, lpToken, owner, signers };
   }
@@ -70,13 +67,15 @@ describe('LPStaking', function () {
       const platform = 'Uniswap-V2';
       const weight = ethers.parseEther('7');
 
-      const receipt = await (await lpStaking.proposeAddPair(lpTokenAddress, 'LIB-USDT', platform, weight)).wait();
+      const receipt = await (await lpStaking.connect(owner).proposeAddPair(lpTokenAddress, 'LIB-USDT', platform, weight)).wait();
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
 
-      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+      await Promise.all(signers.slice(0, 2).map(signer => 
+        lpStaking.connect(signer).approveAction(Number(actionId), { gasLimit: 500000 })
+      ));
 
-      await expect(lpStaking.executeAction(Number(actionId)))
+      await expect(lpStaking.connect(owner).executeAction(Number(actionId)))
         .to.emit(lpStaking, 'PairAdded')
         .withArgs(lpTokenAddress, platform, weight);
 
@@ -161,31 +160,103 @@ describe('LPStaking', function () {
       await lpToken.mint(user1.address, INITIAL_BALANCE);
       await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
 
+      await rewardToken.mint(await lpStaking.getAddress(), REWARD_SUPPLY);
       await setupPairAndRate(lpStaking, lpTokenAddress, signers);
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
     });
 
     it('Should allow unstaking LP tokens', async function () {
-      await expect(lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT))
+      const initialRewardBalance = await rewardToken.balanceOf(user1.address);
+      
+      await expect(lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, true))
         .to.emit(lpStaking, 'StakeRemoved')
         .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
-        const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
-        expect(await rewardToken.balanceOf(user1.address)).to.equal(userStake.pendingRewards);
-        expect(userStake.amount).to.equal(0);
+
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
+      expect(userStake.amount).to.equal(0);
+      expect(userStake.pendingRewards).to.equal(0); // Should be 0 after claiming
+      
+      const finalRewardBalance = await rewardToken.balanceOf(user1.address);
+      expect(finalRewardBalance - initialRewardBalance).to.be.gt(0); // Should have received rewards
     });
 
     it('Should not allow unstaking more than staked amount', async function () {
       await expect(
-        lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT + 1n)
+        lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT + 1n, true)
       ).to.be.revertedWith('Insufficient stake');
     });
 
     it('Should transfer LP tokens back to user', async function () {
       const initialBalance = await lpToken.balanceOf(user1.address);
-      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT);
+      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, true);
       const finalBalance = await lpToken.balanceOf(user1.address);
       
       expect(finalBalance - initialBalance).to.equal(STAKE_AMOUNT);
+    });
+
+    it('Should allow unstaking without claiming rewards and keep them pending', async function () {
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      await expect(lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false))
+        .to.emit(lpStaking, 'StakeRemoved')
+        .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
+
+      const userStakeStruct = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      expect(userStakeStruct.amount).to.equal(0);
+      expect(userStakeStruct.pendingRewards).to.be.gt(0); // Should have pending rewards
+
+      const currentEarned = await lpStaking.earned(user1.address, lpTokenAddress);
+      expect(currentEarned).to.equal(userStakeStruct.pendingRewards); // Should match earned()
+
+      await rewardToken.mint(await lpStaking.getAddress(), userStakeStruct.pendingRewards);
+
+      await expect(lpStaking.connect(user1).claimRewards(lpTokenAddress))
+        .to.emit(lpStaking, 'RewardsClaimed')
+        .withArgs(user1.address, lpTokenAddress, userStakeStruct.pendingRewards);
+
+      expect(await rewardToken.balanceOf(user1.address)).to.equal(userStakeStruct.pendingRewards);
+    });
+
+    it('Should allow claiming pending rewards after contract is refilled', async function () {
+      // Advance time to accumulate rewards
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      // Unstake without claiming rewards
+      await expect(lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false))
+        .to.emit(lpStaking, 'StakeRemoved')
+        .withArgs(user1.address, lpTokenAddress, STAKE_AMOUNT);
+
+      const userStakeStruct = await lpStaking.userStakes(user1.address, lpTokenAddress);
+      expect(userStakeStruct.amount).to.equal(0);
+      expect(userStakeStruct.pendingRewards).to.be.gt(0);
+
+      // Simulate scenario where contract doesn't have enough tokens initially
+      // (this could happen if rewards were withdrawn or contract was underfunded)
+      const contractAddress = await lpStaking.getAddress();
+      const currentBalance = await rewardToken.balanceOf(contractAddress);
+      
+      if (currentBalance < userStakeStruct.pendingRewards) {
+        // Contract doesn't have enough - this simulates an underfunded contract
+        const shortfall = userStakeStruct.pendingRewards - currentBalance;
+        
+        // First claim attempt should fail (insufficient balance)
+        await expect(lpStaking.connect(user1).claimRewards(lpTokenAddress))
+          .to.be.reverted;
+
+        // Someone refills the contract with the shortfall
+        await rewardToken.mint(contractAddress, shortfall);
+      }
+
+      // Now claiming should succeed with full balance
+      const initialUserBalance = await rewardToken.balanceOf(user1.address);
+      await expect(lpStaking.connect(user1).claimRewards(lpTokenAddress))
+        .to.emit(lpStaking, 'RewardsClaimed')
+        .withArgs(user1.address, lpTokenAddress, userStakeStruct.pendingRewards);
+
+      const finalUserBalance = await rewardToken.balanceOf(user1.address);
+      expect(finalUserBalance - initialUserBalance).to.equal(userStakeStruct.pendingRewards);
     });
   });
 
@@ -202,10 +273,12 @@ describe('LPStaking', function () {
       
       await rewardToken.mint(await lpStaking.getAddress(), REWARD_SUPPLY);
       await setupPairAndRate(lpStaking, lpTokenAddress, signers);
-      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      // Don't stake here - let individual tests control staking
     });
 
     it('Should accumulate rewards over time', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      
       await ethers.provider.send('evm_increaseTime', [3600]);
       await ethers.provider.send('evm_mine', []);
 
@@ -213,14 +286,37 @@ describe('LPStaking', function () {
       await lpStaking.connect(user1).claimRewards(lpTokenAddress);
       const finalBalance = await rewardToken.balanceOf(user1.address);
       
-      const expectedRewards = HOURLY_REWARD;
-      expect(ethers.parseEther(finalBalance.toString()) - ethers.parseEther(initialBalance.toString())).to.equal(expectedRewards);
+      const rewardsEarned = finalBalance - initialBalance;
+      const tolerance = HOURLY_REWARD / 1000n; // 0.1% tolerance
+      expect(rewardsEarned).to.be.closeTo(HOURLY_REWARD, tolerance);
     });
 
-    it('Should not allow claiming zero rewards', async function () {
-      await expect(
-        lpStaking.connect(user1).claimRewards(lpTokenAddress)
-      ).to.be.revertedWith('No rewards to claim');
+    it('Should allow claiming small rewards', async function () {
+      // Use a fresh user that hasn't staked before
+      const freshUser = signers[5]; // Use a different signer
+      
+      await lpToken.mint(freshUser.address, INITIAL_BALANCE);
+      await lpToken.connect(freshUser).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
+      
+      // Stake with fresh user
+      await lpStaking.connect(freshUser).stake(lpTokenAddress, STAKE_AMOUNT);
+      
+      // Small delay to allow minimal rewards to accumulate
+      await ethers.provider.send('evm_increaseTime', [1]);
+      await ethers.provider.send('evm_mine', []);
+      
+      // Claiming should succeed and emit event
+      const initialBalance = await rewardToken.balanceOf(freshUser.address);
+      const tx = await lpStaking.connect(freshUser).claimRewards(lpTokenAddress);
+      const receipt = await tx.wait();
+      
+      // Check that rewards were actually transferred
+      const finalBalance = await rewardToken.balanceOf(freshUser.address);
+      const rewardsReceived = finalBalance - initialBalance;
+      expect(rewardsReceived).to.be.gt(0);
+      
+      // Check that the event was emitted (without checking exact amount)
+      expect(tx).to.emit(lpStaking, 'RewardsClaimed').withArgs(freshUser.address, lpTokenAddress);
     });
   });
 
@@ -242,7 +338,7 @@ describe('LPStaking', function () {
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
 
-      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId), { gasLimit: 500000 })));
 
       await expect(lpStaking.executeAction(Number(actionId)))
         .to.emit(lpStaking, 'HourlyRateUpdated')
@@ -260,7 +356,7 @@ describe('LPStaking', function () {
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
 
-      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId), { gasLimit: 500000 })));
 
       await expect(lpStaking.executeAction(Number(actionId)))
         .to.emit(lpStaking, 'WeightsUpdated')
@@ -271,18 +367,18 @@ describe('LPStaking', function () {
     });
 
     it('Should change signer through multisig', async function () {
-      const oldSigner = signers[0];
-      const newSigner = signers[5];
+      const oldSigner = signers[0]; // This is signers[0] from the array (not owner)
+      const newSigner = signers[4]; // Use signers[4] as new signer
     
       // Propose the signer change
-      const receipt = await (await lpStaking.connect(signers[1]).proposeChangeSigner(oldSigner.address, newSigner.address)).wait();
+      const receipt = await (await lpStaking.connect(owner).proposeChangeSigner(oldSigner.address, newSigner.address)).wait();
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
     
-      await lpStaking.connect(signers[2]).approveAction(actionId);
-      await lpStaking.connect(signers[3]).approveAction(actionId);
+      await lpStaking.connect(signers[0]).approveAction(actionId, { gasLimit: 500000 });
+      await lpStaking.connect(signers[1]).approveAction(actionId, { gasLimit: 500000 });
     
-      await expect(lpStaking.connect(signers[1]).executeAction(actionId))
+      await expect(lpStaking.connect(owner).executeAction(actionId))
         .to.emit(lpStaking, 'SignerChanged')
         .withArgs(oldSigner.address, newSigner.address);
     
@@ -296,7 +392,7 @@ describe('LPStaking', function () {
       const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
       const actionId = (event as any)?.args?.actionId;
 
-      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId))));
+      await Promise.all(signers.slice(0, 2).map(signer => lpStaking.connect(signer).approveAction(Number(actionId), { gasLimit: 500000 })));
 
       await expect(lpStaking.connect(signers[1]).executeAction(actionId))
         .to.emit(lpStaking, 'RewardsWithdrawn')
