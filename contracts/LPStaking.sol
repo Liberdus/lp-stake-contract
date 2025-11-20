@@ -259,7 +259,11 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         emit StakeAdded(msg.sender, lpToken, amount);
     }
 
-    function unstake(address lpToken, uint256 amount) external nonReentrant {
+    function unstake(
+        address lpToken,
+        uint256 amount,
+        bool claimRewards
+    ) external nonReentrant {
         LiquidityPair storage pair = pairs[lpToken];
         require(pair.isActive, "Pair not active");
 
@@ -268,25 +272,24 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         updateRewardPerToken(lpToken);
         uint256 rewards = earned(msg.sender, lpToken);
-        userStake.pendingRewards = 0;
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-
         if (amount == userStake.amount) {
             userStake.amount = 0;
-            IERC20(lpToken).safeTransfer(msg.sender, amount);
-            if (rewards > 0) {
-                rewardToken.safeTransfer(msg.sender, rewards);
-            }
         } else {
             userStake.amount -= amount;
-            IERC20(lpToken).safeTransfer(msg.sender, amount);
-            if (rewards > 0) {
-                rewardToken.safeTransfer(msg.sender, rewards);
-            }
         }
 
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        if (claimRewards && rewards > 0) {
+            userStake.pendingRewards = 0;
+        } else {
+            userStake.pendingRewards = rewards;
+        }
+
+        IERC20(lpToken).safeTransfer(msg.sender, amount);
+
         emit StakeRemoved(msg.sender, lpToken, amount);
-        if (rewards > 0) {
+        if (claimRewards && rewards > 0) {
+            rewardToken.safeTransfer(msg.sender, rewards);
             emit RewardsClaimed(msg.sender, lpToken, rewards);
         }
     }
