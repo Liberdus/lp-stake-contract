@@ -289,6 +289,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         emit StakeRemoved(msg.sender, lpToken, amount);
         if (claimRewards && rewards > 0) {
+            require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
             rewardToken.safeTransfer(msg.sender, rewards);
             emit RewardsClaimed(msg.sender, lpToken, rewards);
         }
@@ -306,6 +307,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         userStake.pendingRewards = 0;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
 
+        require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
         rewardToken.safeTransfer(msg.sender, rewards);
         emit RewardsClaimed(msg.sender, lpToken, rewards);
     }
