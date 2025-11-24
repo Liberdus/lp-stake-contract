@@ -81,6 +81,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public totalWeight;
     uint256 public actionCounter;
     mapping(uint256 => PendingAction) public actions;
+    uint256 public totalAccruedRewards;
+    uint256 public totalDistributedRewards;
 
     // ============ Events ============
     event PairAdded(address lpToken, string platform, uint256 weight);
@@ -236,6 +238,13 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return stakesArray;
     }
 
+    function getTotalPendingRewards() external view returns (uint256) {
+        if (totalAccruedRewards <= totalDistributedRewards) {
+            return 0;
+        }
+        return totalAccruedRewards - totalDistributedRewards;
+    }
+
     // ============ User Actions ============
     function stake(address lpToken, uint256 amount) external nonReentrant {
         LiquidityPair storage pair = pairs[lpToken];
@@ -291,6 +300,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         if (claimRewards && rewards > 0) {
             require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
             rewardToken.safeTransfer(msg.sender, rewards);
+            totalDistributedRewards += rewards;
             emit RewardsClaimed(msg.sender, lpToken, rewards);
         }
     }
@@ -309,6 +319,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
         require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
         rewardToken.safeTransfer(msg.sender, rewards);
+        totalDistributedRewards += rewards;
         emit RewardsClaimed(msg.sender, lpToken, rewards);
     }
 
@@ -645,6 +656,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             uint256 pairRewards = (rewardPerSecond *
                 timeDelta *
                 pairs[lpToken].weight) / totalWeight;
+            totalAccruedRewards += pairRewards;
             rewardPerTokenStored[lpToken] +=
                 (pairRewards * PRECISION) /
                 totalSupply;
