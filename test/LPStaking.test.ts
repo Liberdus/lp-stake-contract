@@ -402,4 +402,87 @@ describe('LPStaking', function () {
         expect(balance).to.equal(STAKE_AMOUNT);
     });
   });
+
+  describe('Reward Obligation Tracking', function () {
+    let user1: SignerWithAddress;
+    let lpTokenAddress: string;
+
+    beforeEach(async function () {
+      [owner, user1, ...signers] = await ethers.getSigners();
+      
+      lpTokenAddress = await lpToken.getAddress();
+      await lpToken.mint(user1.address, INITIAL_BALANCE);
+      await lpToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
+      
+      await rewardToken.mint(await lpStaking.getAddress(), REWARD_SUPPLY);
+      await setupPairAndRate(lpStaking, lpTokenAddress, signers);
+    });
+
+    it('Should track total reward obligation correctly', async function () {
+      // Initial obligation should be 0
+      expect(await lpStaking.totalRewardsObligated()).to.equal(0);
+      expect(await lpStaking.getTotalRewardObligation()).to.equal(0);
+
+      // Stake
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      // Advance time by 1 hour
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      // Check view function (should show ~HOURLY_REWARD)
+      const obligation = await lpStaking.getTotalRewardObligation();
+      const tolerance = HOURLY_REWARD / 1000n; // 0.1% tolerance
+      expect(obligation).to.be.closeTo(HOURLY_REWARD, tolerance);
+
+      // State variable shouldn't update until interaction
+      expect(await lpStaking.totalRewardsObligated()).to.equal(0);
+
+      // Trigger update via claim
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
+
+      // After claiming, obligation should be close to 0 (just the tiny bit since last block)
+      const remainingObligation = await lpStaking.getTotalRewardObligation();
+      expect(remainingObligation).to.be.lt(ethers.parseEther('1')); // Should be very small
+    });
+
+    it('Should update obligation on unstake with claim', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const preUnstakeObligation = await lpStaking.getTotalRewardObligation();
+      expect(preUnstakeObligation).to.be.closeTo(HOURLY_REWARD, HOURLY_REWARD / 1000n);
+
+      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, true);
+
+      const postUnstakeObligation = await lpStaking.getTotalRewardObligation();
+      expect(postUnstakeObligation).to.be.lt(ethers.parseEther('1'));
+    });
+
+    it('Should handle multiple users correctly', async function () {
+      const user2 = signers[0];
+      await lpToken.mint(user2.address, INITIAL_BALANCE);
+      await lpToken.connect(user2).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
+
+      // Both users stake same amount
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      await lpStaking.connect(user2).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      // Total obligation should be ~HOURLY_REWARD (split between users, but total is same)
+      const obligation = await lpStaking.getTotalRewardObligation();
+      expect(obligation).to.be.closeTo(HOURLY_REWARD, HOURLY_REWARD / 1000n);
+
+      // User 1 claims
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
+
+      // Obligation should drop by half
+      const remainingObligation = await lpStaking.getTotalRewardObligation();
+      expect(remainingObligation).to.be.closeTo(HOURLY_REWARD / 2n, HOURLY_REWARD / 1000n);
+    });
+  });
 });
