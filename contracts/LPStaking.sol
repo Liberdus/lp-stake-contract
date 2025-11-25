@@ -80,6 +80,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     mapping(address => uint256) public lastUpdateTime;
     uint256 public totalWeight;
     uint256 public actionCounter;
+    uint256 public totalRewardsObligated;
     mapping(uint256 => PendingAction) public actions;
 
     // ============ Events ============
@@ -236,6 +237,28 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         return stakesArray;
     }
 
+    function getTotalRewardObligation() external view returns (uint256) {
+        uint256 pending = 0;
+        for (uint i = 0; i < activePairs.length; i++) {
+            address lpToken = activePairs[i];
+            if (
+                pairs[lpToken].isActive &&
+                IERC20(lpToken).balanceOf(address(this)) > 0 &&
+                totalWeight > 0
+            ) {
+                uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
+                if (timeDelta > 0) {
+                    uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
+                    uint256 pairRewards = (rewardPerSecond *
+                        timeDelta *
+                        pairs[lpToken].weight) / totalWeight;
+                    pending += pairRewards;
+                }
+            }
+        }
+        return totalRewardsObligated + pending;
+    }
+
     // ============ User Actions ============
     function stake(address lpToken, uint256 amount) external nonReentrant {
         LiquidityPair storage pair = pairs[lpToken];
@@ -290,6 +313,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         emit StakeRemoved(msg.sender, lpToken, amount);
         if (claimRewards && rewards > 0) {
             require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
+            totalRewardsObligated -= rewards;
             rewardToken.safeTransfer(msg.sender, rewards);
             emit RewardsClaimed(msg.sender, lpToken, rewards);
         }
@@ -308,6 +332,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
 
         require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
+        totalRewardsObligated -= rewards;
         rewardToken.safeTransfer(msg.sender, rewards);
         emit RewardsClaimed(msg.sender, lpToken, rewards);
     }
@@ -648,6 +673,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             rewardPerTokenStored[lpToken] +=
                 (pairRewards * PRECISION) /
                 totalSupply;
+            totalRewardsObligated += pairRewards;
         }
 
         lastUpdateTime[lpToken] = block.timestamp;
