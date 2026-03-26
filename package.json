@@ -4,7 +4,8 @@
   "description": "Liquidity Provider Staking",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "compile": "hardhat compile",
+    "test": "hardhat test"
   },
   "keywords": [],
   "author": "",

@@ -403,6 +403,356 @@ describe('LPStaking', function () {
     });
   });
 
+  describe('Action Array & Clearing Logic', function () {
+    const SEVEN_DAYS = 7 * 24 * 3600;
+
+    async function proposeAndGetId(lpStaking: LPStaking, proposeFn: Promise<any>): Promise<number> {
+      const receipt = await (await proposeFn).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment?.name === 'ActionProposed');
+      return Number((event as any)?.args?.actionId);
+    }
+
+    async function approveAndExecute(lpStaking: LPStaking, actionId: number, approvers: SignerWithAddress[]) {
+      for (const approver of approvers) {
+        await lpStaking.connect(approver).approveAction(actionId);
+      }
+      await lpStaking.executeAction(actionId);
+    }
+
+    // --- actionIds persist until explicitly cleared ---
+
+    it('Should keep actionId in array and mapping after execute', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      expect((await lpStaking.getActionIds()).length).to.equal(1);
+
+      await approveAndExecute(lpStaking, actionId, signers.slice(0, 2));
+
+      // Still in array, mapping persists with executed flag
+      expect((await lpStaking.getActionIds()).map(Number)).to.include(actionId);
+      expect((await lpStaking.actions(actionId)).executed).to.be.true;
+      expect((await lpStaking.actions(actionId)).proposedTime).to.be.gt(0);
+    });
+
+    it('Should keep actionId in array and mapping after reject', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await lpStaking.connect(signers[2]).rejectAction(actionId);
+
+      expect((await lpStaking.getActionIds()).map(Number)).to.include(actionId);
+      expect((await lpStaking.actions(actionId)).rejected).to.be.true;
+      expect((await lpStaking.actions(actionId)).proposedTime).to.be.gt(0);
+    });
+
+    it('Should keep actionId in array after handleExpiredAction (just flags)', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await ethers.provider.send('evm_increaseTime', [SEVEN_DAYS + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.connect(owner).handleExpiredAction(actionId);
+
+      expect((await lpStaking.getActionIds()).map(Number)).to.include(actionId);
+      expect((await lpStaking.actions(actionId)).expired).to.be.true;
+      expect((await lpStaking.actions(actionId)).proposedTime).to.be.gt(0);
+    });
+
+    it('Should prevent double-expire via handleExpiredAction', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await ethers.provider.send('evm_increaseTime', [SEVEN_DAYS + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.connect(owner).handleExpiredAction(actionId);
+      await expect(lpStaking.connect(owner).handleExpiredAction(actionId))
+        .to.be.revertedWith('Action already marked expired');
+    });
+
+    it('Should track all IDs including terminal ones', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+      const id3 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('300'))
+      );
+
+      await approveAndExecute(lpStaking, id2, signers.slice(0, 2));
+
+      // All three still in array
+      const ids = (await lpStaking.getActionIds()).map(Number);
+      expect(ids).to.deep.equal([id1, id2, id3]);
+    });
+
+    // --- getActiveActions (filtered view) ---
+
+    it('Should return only active actions, excluding executed', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+      await approveAndExecute(lpStaking, id1, signers.slice(0, 2));
+
+      // getActionIds has both
+      expect((await lpStaking.getActionIds()).length).to.equal(2);
+      // getActiveActions filters out executed
+      const [activeIds, activeActions] = await lpStaking.getActiveActions();
+      expect(activeIds.length).to.equal(1);
+      expect(Number(activeIds[0])).to.equal(id2);
+      expect(activeActions[0].newHourlyRewardRate).to.equal(ethers.parseEther('200'));
+    });
+
+    it('Should exclude rejected from getActiveActions', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await lpStaking.connect(signers[2]).rejectAction(id1);
+
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+
+      const [activeIds] = await lpStaking.getActiveActions();
+      expect(activeIds.length).to.equal(1);
+      expect(Number(activeIds[0])).to.equal(id2);
+    });
+
+    it('Should exclude time-expired from getActiveActions even without explicit flag', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await ethers.provider.send('evm_increaseTime', [SEVEN_DAYS + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      // id1 expired by time, no handleExpiredAction called
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+
+      const [activeIds] = await lpStaking.getActiveActions();
+      expect(activeIds.length).to.equal(1);
+      expect(Number(activeIds[0])).to.equal(id2);
+    });
+
+    it('Should return empty from getActiveActions when no active actions', async function () {
+      const [ids, actions] = await lpStaking.getActiveActions();
+      expect(ids.length).to.equal(0);
+      expect(actions.length).to.equal(0);
+    });
+
+    // --- clearAction ---
+
+    it('Should clear an executed action (removes from array + deletes mapping)', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, actionId, signers.slice(0, 2));
+
+      await expect(lpStaking.connect(owner).clearAction(actionId))
+        .to.emit(lpStaking, 'ActionCleared').withArgs(actionId);
+
+      expect((await lpStaking.getActionIds()).length).to.equal(0);
+      expect((await lpStaking.actions(actionId)).proposedTime).to.equal(0);
+    });
+
+    it('Should clear a rejected action', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await lpStaking.connect(signers[2]).rejectAction(actionId);
+
+      await expect(lpStaking.connect(owner).clearAction(actionId))
+        .to.emit(lpStaking, 'ActionCleared');
+
+      expect((await lpStaking.getActionIds()).length).to.equal(0);
+      expect((await lpStaking.actions(actionId)).proposedTime).to.equal(0);
+    });
+
+    it('Should clear an expired action (by time, without explicit flag)', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await ethers.provider.send('evm_increaseTime', [SEVEN_DAYS + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await expect(lpStaking.connect(owner).clearAction(actionId))
+        .to.emit(lpStaking, 'ActionCleared');
+
+      expect((await lpStaking.getActionIds()).length).to.equal(0);
+      expect((await lpStaking.actions(actionId)).proposedTime).to.equal(0);
+    });
+
+    it('Should revert clearAction on a still-active action', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await expect(lpStaking.connect(owner).clearAction(actionId))
+        .to.be.revertedWith('Action still active');
+    });
+
+    it('Should revert clearAction on already-cleared action', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, actionId, signers.slice(0, 2));
+      await lpStaking.connect(owner).clearAction(actionId);
+
+      await expect(lpStaking.connect(owner).clearAction(actionId))
+        .to.be.revertedWith('Action does not exist');
+    });
+
+    it('Should revert clearAction from non-admin', async function () {
+      const actionId = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, actionId, signers.slice(0, 2));
+
+      const nonAdmin = signers[5];
+      await expect(lpStaking.connect(nonAdmin).clearAction(actionId))
+        .to.be.reverted;
+    });
+
+    // --- clearActions (batch) ---
+
+    it('Should batch-clear multiple terminal actions', async function () {
+      const ids: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const id = await proposeAndGetId(lpStaking,
+          lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther(`${(i + 1) * 100}`))
+        );
+        await approveAndExecute(lpStaking, id, signers.slice(0, 2));
+        ids.push(id);
+      }
+
+      // All still in array and mapping before clear
+      expect((await lpStaking.getActionIds()).length).to.equal(3);
+
+      await lpStaking.connect(owner).clearActions(ids);
+
+      for (const id of ids) {
+        expect((await lpStaking.actions(id)).proposedTime).to.equal(0);
+      }
+      expect((await lpStaking.getActionIds()).length).to.equal(0);
+    });
+
+    it('Should revert batch clear if any action is still active', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, id1, signers.slice(0, 2));
+
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+
+      await expect(lpStaking.connect(owner).clearActions([id1, id2]))
+        .to.be.revertedWith('Action still active');
+    });
+
+    it('Should revert batch clear when input contains invalid action IDs', async function () {
+      const fakeIds = Array.from({ length: 51 }, (_, i) => i + 1);
+      await expect(lpStaking.connect(owner).clearActions(fakeIds))
+        .to.be.revertedWith('Invalid actionId');
+    });
+
+    // --- clearOldActions (single sweep) ---
+
+    it('Should clear all terminal actions in one sweep, keep active', async function () {
+      // id1: executed
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, id1, signers.slice(0, 2));
+
+      // id2: rejected
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+      await lpStaking.connect(signers[2]).rejectAction(id2);
+
+      // id3: will expire
+      const id3 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('300'))
+      );
+
+      await ethers.provider.send('evm_increaseTime', [SEVEN_DAYS + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      // id4: fresh active
+      const id4 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('400'))
+      );
+
+      // All four in array
+      expect((await lpStaking.getActionIds()).length).to.equal(4);
+
+      await expect(lpStaking.connect(owner).clearOldActions())
+        .to.emit(lpStaking, 'ActionCleared').withArgs(id1)
+        .and.to.emit(lpStaking, 'ActionCleared').withArgs(id2)
+        .and.to.emit(lpStaking, 'ActionCleared').withArgs(id3);
+
+      // Only id4 remains
+      const remaining = (await lpStaking.getActionIds()).map(Number);
+      expect(remaining).to.deep.equal([id4]);
+      expect((await lpStaking.actions(id1)).proposedTime).to.equal(0);
+      expect((await lpStaking.actions(id2)).proposedTime).to.equal(0);
+      expect((await lpStaking.actions(id3)).proposedTime).to.equal(0);
+      expect((await lpStaking.actions(id4)).proposedTime).to.be.gt(0);
+    });
+
+    it('Should not clear active actions in clearOldActions', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+
+      await lpStaking.connect(owner).clearOldActions();
+
+      expect((await lpStaking.getActionIds()).length).to.equal(2);
+      expect((await lpStaking.actions(id1)).proposedTime).to.be.gt(0);
+      expect((await lpStaking.actions(id2)).proposedTime).to.be.gt(0);
+    });
+
+    it('Should be idempotent — second clearOldActions is a no-op', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, id1, signers.slice(0, 2));
+
+      await lpStaking.connect(owner).clearOldActions();
+      expect((await lpStaking.actions(id1)).proposedTime).to.equal(0);
+
+      const tx = await lpStaking.connect(owner).clearOldActions();
+      const receipt = await tx.wait();
+      const clearedEvents = receipt?.logs?.filter((e: any) => e.fragment?.name === 'ActionCleared') || [];
+      expect(clearedEvents.length).to.equal(0);
+    });
+
+    it('Should allow proposing new actions after clearing', async function () {
+      const id1 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('100'))
+      );
+      await approveAndExecute(lpStaking, id1, signers.slice(0, 2));
+      await lpStaking.connect(owner).clearOldActions();
+
+      const id2 = await proposeAndGetId(lpStaking,
+        lpStaking.connect(owner).proposeSetHourlyRewardRate(ethers.parseEther('200'))
+      );
+      expect(id2).to.equal(id1 + 1);
+      expect((await lpStaking.getActionIds()).map(Number)).to.deep.equal([id2]);
+    });
+  });
+
   describe('Reward Obligation Tracking', function () {
     let user1: SignerWithAddress;
     let lpTokenAddress: string;

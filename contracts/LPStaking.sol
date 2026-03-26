@@ -81,7 +81,9 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     uint256 public totalWeight;
     uint256 public actionCounter;
     uint256 public totalRewardsObligated;
+    uint256 public maxClearItems = 100;
     mapping(uint256 => PendingAction) public actions;
+    uint256[] public actionIds;
 
     // ============ Events ============
     event PairAdded(address lpToken, string platform, uint256 weight);
@@ -102,6 +104,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event ActionExpired(uint256 actionId);
     event RewardsWithdrawn(address recipient, uint256 amount);
     event ActionRejected(uint256 actionId, address rejecter);
+    event ActionCleared(uint256 actionId);
 
     // ============ Constructor ============
     constructor(address _rewardToken, address[] memory _initialSigners) {
@@ -204,6 +207,32 @@ contract LPStaking is ReentrancyGuard, AccessControl {
 
     function getSigners() external view returns (address[] memory) {
         return signers;
+    }
+
+    function getActionIds() external view returns (uint256[] memory) {
+        return actionIds;
+    }
+
+    function getActiveActions() external view returns (uint256[] memory, PendingAction[] memory) {
+        uint256 count = 0;
+        for (uint i = 0; i < actionIds.length; i++) {
+            PendingAction storage pa = actions[actionIds[i]];
+            if (!pa.executed && !pa.rejected && !isActionExpired(actionIds[i])) {
+                count++;
+            }
+        }
+        uint256[] memory activeIdsList = new uint256[](count);
+        PendingAction[] memory activeActions = new PendingAction[](count);
+        uint256 idx = 0;
+        for (uint i = 0; i < actionIds.length; i++) {
+            PendingAction storage pa = actions[actionIds[i]];
+            if (!pa.executed && !pa.rejected && !isActionExpired(actionIds[i])) {
+                activeIdsList[idx] = actionIds[i];
+                activeActions[idx] = pa;
+                idx++;
+            }
+        }
+        return (activeIdsList, activeActions);
     }
 
     function getPairs() external view returns (LiquidityPair[] memory) {
@@ -345,20 +374,88 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Action already executed");
         require(!pa.expired, "Action already marked expired");
+        require(!pa.rejected, "Action already rejected");
         require(isActionExpired(actionId), "Action not expired yet");
 
         pa.expired = true;
         emit ActionExpired(actionId);
     }
 
-    function cleanupExpiredActions() external onlyRole(ADMIN_ROLE) {
-        for (uint256 i = 1; i <= actionCounter; i++) {
-            PendingAction storage pa = actions[i];
-            if (!pa.executed && !pa.expired && isActionExpired(i)) {
-                pa.expired = true;
-                emit ActionExpired(i);
+    function clearAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        PendingAction storage pa = actions[actionId];
+        require(pa.proposedTime > 0, "Action does not exist");
+        require(pa.executed || pa.rejected || isActionExpired(actionId), "Action still active");
+
+        _removeActionId(actionId);
+        delete actions[actionId];
+        emit ActionCleared(actionId);
+    }
+
+    function clearActions(
+        uint256[] calldata actionIdsToClear
+    ) external onlyRole(ADMIN_ROLE) returns (uint256 clearedCount, uint256 eligibleButNotClearedCount) {
+        uint256 totalEligible = 0;
+        for (uint256 i = 0; i < actionIdsToClear.length; i++) {
+            uint256 actionId = actionIdsToClear[i];
+            if (actionId > 0 && actionId <= actionCounter) {
+                PendingAction storage pa = actions[actionId];
+                if (pa.proposedTime > 0 && (pa.executed || pa.rejected || isActionExpired(actionId))) {
+                    totalEligible++;
+                }
             }
         }
+
+        uint256 itemsToClear = actionIdsToClear.length;
+        if (itemsToClear > maxClearItems) {
+            itemsToClear = maxClearItems;
+        }
+
+        for (uint256 i = 0; i < itemsToClear; i++) {
+            uint256 actionId = actionIdsToClear[i];
+            require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+            PendingAction storage pa = actions[actionId];
+            require(pa.proposedTime > 0, "Action does not exist");
+            require(pa.executed || pa.rejected || isActionExpired(actionId), "Action still active");
+
+            _removeActionId(actionId);
+            delete actions[actionId];
+            emit ActionCleared(actionId);
+            clearedCount++;
+        }
+
+        eligibleButNotClearedCount = totalEligible - clearedCount;
+    }
+
+    function clearOldActions()
+        external
+        onlyRole(ADMIN_ROLE)
+        returns (uint256 clearedCount, uint256 eligibleButNotClearedCount)
+    {
+        uint256 totalEligible = 0;
+        for (uint256 j = 0; j < actionIds.length; j++) {
+            uint256 actionId = actionIds[j];
+            PendingAction storage pa = actions[actionId];
+            if (pa.executed || pa.rejected || isActionExpired(actionId)) {
+                totalEligible++;
+            }
+        }
+
+        uint256 i = 0;
+        while (i < actionIds.length && clearedCount < maxClearItems) {
+            uint256 actionId = actionIds[i];
+            PendingAction storage pa = actions[actionId];
+            if (pa.executed || pa.rejected || isActionExpired(actionId)) {
+                _removeActionId(actionId);
+                delete actions[actionId];
+                emit ActionCleared(actionId);
+                clearedCount++;
+            } else {
+                i++;
+            }
+        }
+
+        eligibleButNotClearedCount = totalEligible - clearedCount;
     }
 
     function proposeWithdrawRewards(
@@ -374,6 +471,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(amount <= type(uint128).max, "Amount too large");
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.WITHDRAW_REWARDS;
         pa.recipient = recipient;
@@ -395,6 +493,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(newRate <= type(uint128).max, "Rate too high");
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.SET_HOURLY_REWARD_RATE;
         pa.newHourlyRewardRate = newRate;
@@ -423,6 +522,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         }
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.UPDATE_PAIR_WEIGHTS;
         pa.pairs = lpTokens;
@@ -453,6 +553,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(bytes(platform).length <= 32, "Platform name too long");
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.ADD_PAIR;
         pa.pairToAdd = lpToken;
@@ -473,6 +574,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.REMOVE_PAIR;
         pa.pairToRemove = lpToken;
@@ -493,6 +595,7 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         require(newSigner != address(0), "Invalid new signer");
 
         actionCounter++;
+        actionIds.push(actionCounter);
         PendingAction storage pa = actions[actionCounter];
         pa.actionType = ActionType.CHANGE_SIGNER;
         pa.pairToAdd = oldSigner; // Reusing fields for signer addresses
@@ -717,4 +820,16 @@ contract LPStaking is ReentrancyGuard, AccessControl {
             }
         }
     }
+
+    function _removeActionId(uint256 actionId) internal {
+        uint256 length = actionIds.length;
+        for (uint256 i = 0; i < length; i++) {
+            if (actionIds[i] == actionId) {
+                actionIds[i] = actionIds[length - 1];
+                actionIds.pop();
+                break;
+            }
+        }
+    }
+
 }
