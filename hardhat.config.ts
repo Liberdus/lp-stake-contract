@@ -32,6 +32,11 @@ const config: HardhatUserConfig = {
       chainId: 97,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     },
+    bsc: {
+      url: process.env.BSC_MAINNET_RPC_URL || 'https://bsc-dataseed.bnbchain.org',
+      chainId: 56,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
+    },
     local: {
       url: 'http://127.0.0.1:8545',
       chainId: 31337,
@@ -49,6 +54,7 @@ const config: HardhatUserConfig = {
     apiKey: {
       polygon: process.env.ETHERSCAN_API_KEY || '',
       polygonAmoy: process.env.ETHERSCAN_API_KEY || '',
+      bsc: process.env.ETHERSCAN_API_KEY || '',
       bscTestnet: process.env.ETHERSCAN_API_KEY || '',
     },
   },
