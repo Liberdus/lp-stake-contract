@@ -9,9 +9,9 @@ async function main() {
     throw new Error("Usage: node scripts/verify-bsc-testnet-v2.js <contractAddress>");
   }
 
-  const apiKey = process.env.BSCSCAN_API_KEY || process.env.ETHERSCAN_API_KEY;
+  const apiKey = process.env.ETHERSCAN_API_KEY;
   if (!apiKey) {
-    throw new Error("Missing Etherscan API key in BSCSCAN_API_KEY or ETHERSCAN_API_KEY");
+    throw new Error("Missing ETHERSCAN_API_KEY");
   }
 
   const rewardToken = process.env.BSC_TESTNET_REWARD_TOKEN;
@@ -30,7 +30,7 @@ async function main() {
     .encode(["address", "address[]"], [rewardToken, initialSigners])
     .slice(2);
 
-  const buildInfo = loadLpStakingBuildInfo();
+  const buildInfo = loadLpStakingBuildInfo(contractAddress);
   const payload = new URLSearchParams({
     apikey: apiKey,
     module: "contract",
@@ -92,21 +92,54 @@ async function main() {
   throw new Error("Timed out waiting for verification result");
 }
 
-function loadLpStakingBuildInfo() {
-  const buildInfoDir = path.join(process.cwd(), "artifacts", "build-info");
-  const buildInfoFile = fs
-    .readdirSync(buildInfoDir)
-    .map((file) => path.join(buildInfoDir, file))
-    .find((file) => {
-      const json = JSON.parse(fs.readFileSync(file, "utf8"));
-      return json.output?.contracts?.["contracts/LPStaking.sol"]?.LPStaking;
-    });
+function loadLpStakingBuildInfo(contractAddress) {
+  const dbgFile = resolveDebugArtifact(contractAddress);
+  const dbgJson = JSON.parse(fs.readFileSync(dbgFile, "utf8"));
+  const buildInfoFile = path.resolve(path.dirname(dbgFile), dbgJson.buildInfo);
 
-  if (!buildInfoFile) {
-    throw new Error("Could not find LPStaking build-info");
+  if (!fs.existsSync(buildInfoFile)) {
+    throw new Error(`Could not find build-info referenced by ${dbgFile}`);
   }
 
   return JSON.parse(fs.readFileSync(buildInfoFile, "utf8"));
+}
+
+function resolveDebugArtifact(contractAddress) {
+  const deploymentDir = path.join(process.cwd(), "ignition", "deployments", "chain-97");
+  const deployedAddressesFile = path.join(deploymentDir, "deployed_addresses.json");
+
+  if (fs.existsSync(deployedAddressesFile)) {
+    const deployedAddresses = JSON.parse(fs.readFileSync(deployedAddressesFile, "utf8"));
+    const deploymentKey = Object.entries(deployedAddresses).find(
+      ([, address]) => String(address).toLowerCase() === contractAddress.toLowerCase()
+    )?.[0];
+
+    if (deploymentKey) {
+      const deploymentDebugFile = path.join(
+        deploymentDir,
+        "artifacts",
+        `${deploymentKey}.dbg.json`
+      );
+
+      if (fs.existsSync(deploymentDebugFile)) {
+        return deploymentDebugFile;
+      }
+    }
+  }
+
+  const artifactDebugFile = path.join(
+    process.cwd(),
+    "artifacts",
+    "contracts",
+    "LPStaking.sol",
+    "LPStaking.dbg.json"
+  );
+
+  if (fs.existsSync(artifactDebugFile)) {
+    return artifactDebugFile;
+  }
+
+  throw new Error("Could not find LPStaking debug artifact");
 }
 
 main().catch((error) => {
