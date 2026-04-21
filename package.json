@@ -4,7 +4,14 @@
   "description": "Liquidity Provider Staking",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "compile": "hardhat compile",
+    "deploy:bsc-mainnet": "hardhat ignition deploy ignition/modules/LPStaking.bscMainnet.ts --network bsc",
+    "deploy:bsc-mainnet:verify": "node scripts/deploy-and-verify-bsc-mainnet.js",
+    "deploy:bsc-testnet": "hardhat ignition deploy ignition/modules/LPStaking.bscTestnet.ts --network bscTestnet",
+    "deploy:bsc-testnet:verify": "node scripts/deploy-and-verify-bsc-testnet.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "verify:bsc-mainnet": "node scripts/verify-bsc-mainnet-v2.js",
+    "verify:bsc-testnet": "node scripts/verify-bsc-testnet-v2.js"
   },
   "keywords": [],
   "author": "",
