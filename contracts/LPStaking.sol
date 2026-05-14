@@ -88,7 +88,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     event PairRemoved(address lpToken, string pairName);
     event StakeAdded(address user, address lpToken, uint256 amount);
     event StakeRemoved(address user, address lpToken, uint256 amount);
+    event StakeRemovedTo(address indexed user, address indexed receiver, address indexed lpToken, uint256 amount);
     event RewardsClaimed(address user, address lpToken, uint256 amount);
+    event RewardsClaimedTo(address indexed user, address indexed receiver, address indexed lpToken, uint256 amount);
     event HourlyRateUpdated(uint256 newRate);
     event WeightsUpdated(address[] pairs, uint256[] weights);
     event SignerChanged(address oldSigner, address newSigner);
@@ -144,7 +146,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         address user,
         address lpToken
     ) public view returns (uint256) {
-        UserStake storage stake = userStakes[user][lpToken];
+        UserStake storage storedStake = userStakes[user][lpToken];
         uint256 currentRewardPerToken = rewardPerTokenStored[lpToken];
 
         if (
@@ -163,10 +165,10 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         }
 
         return
-            (stake.amount *
-                (currentRewardPerToken - stake.rewardPerTokenPaid)) /
+            (storedStake.amount *
+                (currentRewardPerToken - storedStake.rewardPerTokenPaid)) /
             PRECISION +
-            stake.pendingRewards;
+            storedStake.pendingRewards;
     }
 
     function getPairInfo(
@@ -193,8 +195,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         view
         returns (uint256 amount, uint256 pendingRewards, uint256 lastRewardTime)
     {
-        UserStake storage stake = userStakes[user][lpToken];
-        return (stake.amount, earned(user, lpToken), stake.lastRewardTime);
+        UserStake storage storedStake = userStakes[user][lpToken];
+        return (storedStake.amount, earned(user, lpToken), storedStake.lastRewardTime);
     }
 
     function getActivePairs() external view returns (address[] memory) {
@@ -284,56 +286,26 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     function unstake(
         address lpToken,
         uint256 amount,
-        bool claimRewards
+        bool shouldClaimRewards
     ) external nonReentrant {
-        LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
+        _unstake(lpToken, amount, shouldClaimRewards, msg.sender);
+    }
 
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-        require(userStake.amount >= amount, "Insufficient stake");
-
-        updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
-        if (amount == userStake.amount) {
-            userStake.amount = 0;
-        } else {
-            userStake.amount -= amount;
-        }
-
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-        if (claimRewards && rewards > 0) {
-            userStake.pendingRewards = 0;
-        } else {
-            userStake.pendingRewards = rewards;
-        }
-
-        IERC20(lpToken).safeTransfer(msg.sender, amount);
-
-        emit StakeRemoved(msg.sender, lpToken, amount);
-        if (claimRewards && rewards > 0) {
-            require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
-            totalRewardsObligated -= rewards;
-            rewardToken.safeTransfer(msg.sender, rewards);
-            emit RewardsClaimed(msg.sender, lpToken, rewards);
-        }
+    function unstakeTo(
+        address lpToken,
+        uint256 amount,
+        bool shouldClaimRewards,
+        address receiver
+    ) external nonReentrant {
+        _unstake(lpToken, amount, shouldClaimRewards, receiver);
     }
 
     function claimRewards(address lpToken) external nonReentrant {
-        LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
+        _claimRewards(lpToken, msg.sender);
+    }
 
-        updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
-        require(rewards > 0, "No rewards to claim");
-
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
-        userStake.pendingRewards = 0;
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-
-        require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
-        totalRewardsObligated -= rewards;
-        rewardToken.safeTransfer(msg.sender, rewards);
-        emit RewardsClaimed(msg.sender, lpToken, rewards);
+    function claimRewardsTo(address lpToken, address receiver) external nonReentrant {
+        _claimRewards(lpToken, receiver);
     }
 
     // ============ Admin Actions ============
@@ -651,6 +623,69 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     }
 
     // ============ Internal Functions ============
+    function _unstake(
+        address lpToken,
+        uint256 amount,
+        bool shouldClaimRewards,
+        address receiver
+    ) internal {
+        require(receiver != address(0), "Invalid receiver");
+
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        require(userStake.amount >= amount, "Insufficient stake");
+
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
+        if (amount == userStake.amount) {
+            userStake.amount = 0;
+        } else {
+            userStake.amount -= amount;
+        }
+
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        if (shouldClaimRewards && rewards > 0) {
+            userStake.pendingRewards = 0;
+        } else {
+            userStake.pendingRewards = rewards;
+        }
+
+        IERC20(lpToken).safeTransfer(receiver, amount);
+
+        emit StakeRemoved(msg.sender, lpToken, amount);
+        emit StakeRemovedTo(msg.sender, receiver, lpToken, amount);
+        if (shouldClaimRewards && rewards > 0) {
+            require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
+            totalRewardsObligated -= rewards;
+            rewardToken.safeTransfer(receiver, rewards);
+            emit RewardsClaimed(msg.sender, lpToken, rewards);
+            emit RewardsClaimedTo(msg.sender, receiver, lpToken, rewards);
+        }
+    }
+
+    function _claimRewards(address lpToken, address receiver) internal {
+        require(receiver != address(0), "Invalid receiver");
+
+        LiquidityPair storage pair = pairs[lpToken];
+        require(pair.isActive, "Pair not active");
+
+        updateRewardPerToken(lpToken);
+        uint256 rewards = earned(msg.sender, lpToken);
+        require(rewards > 0, "No rewards to claim");
+
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        userStake.pendingRewards = 0;
+        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+
+        require(rewardToken.balanceOf(address(this)) >= rewards, "Insufficient reward balance");
+        totalRewardsObligated -= rewards;
+        rewardToken.safeTransfer(receiver, rewards);
+        emit RewardsClaimed(msg.sender, lpToken, rewards);
+        emit RewardsClaimedTo(msg.sender, receiver, lpToken, rewards);
+    }
+
     function updateAllRewards() internal {
         for (uint i = 0; i < activePairs.length; i++) {
             address lpToken = activePairs[i];
