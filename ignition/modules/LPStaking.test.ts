@@ -15,7 +15,7 @@ const LPStakingModule = buildModule('LPStakingModule', (m) => {
 
   const lpStaking = m.contract('LPStaking', [libToken, INITIAL_SIGNERS], { id: 'LPStaking' });
 
-  return { libToken, lpStaking };
+  return { lpStaking };
 });
 
 export default LPStakingModule;
