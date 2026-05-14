@@ -5,13 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 
-contract LPStaking is ReentrancyGuard, AccessControl {
+contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ Constants ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant OWNER_APPROVER_ROLE = keccak256("OWNER_APPROVER_ROLE");
     uint256 public constant PRECISION = 1e18;
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
@@ -104,13 +104,12 @@ contract LPStaking is ReentrancyGuard, AccessControl {
     event ActionRejected(uint256 actionId, address rejecter);
 
     // ============ Constructor ============
-    constructor(address _rewardToken, address[] memory _initialSigners) {
+    constructor(address _rewardToken, address[] memory _initialSigners) Ownable(msg.sender) {
         require(_initialSigners.length == 4, "Must provide exactly 4 signers");
         require(_rewardToken != address(0), "Invalid reward token address");
         rewardToken = IERC20(_rewardToken);
         signers = _initialSigners;
 
-        _grantRole(OWNER_APPROVER_ROLE, msg.sender);
         for (uint i = 0; i < _initialSigners.length; i++) {
             require(_initialSigners[i] != address(0), "Invalid signer address");
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
@@ -515,8 +514,8 @@ contract LPStaking is ReentrancyGuard, AccessControl {
         PendingAction storage pa = actions[actionId];
         if (pa.actionType == ActionType.CHANGE_SIGNER) {
             require(
-                hasRole(ADMIN_ROLE, msg.sender) || hasRole(OWNER_APPROVER_ROLE, msg.sender),
-                "Caller must have ADMIN_ROLE or OWNER_APPROVER_ROLE"
+                hasRole(ADMIN_ROLE, msg.sender) || msg.sender == owner(),
+                "Caller must have ADMIN_ROLE or owner"
             );
         } else {
             require(hasRole(ADMIN_ROLE, msg.sender), "Caller must have ADMIN_ROLE");

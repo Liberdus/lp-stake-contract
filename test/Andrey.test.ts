@@ -203,7 +203,7 @@ describe("Andrey", function () {
       expect(pair2.isActive).to.be.true;
 
       await expect(
-        lpStaking.connect(user).unstake(lpTokenAddress, STAKE_AMOUNT)
+        lpStaking.connect(user).unstake(lpTokenAddress, STAKE_AMOUNT, false)
       )
         .to.emit(lpStaking, "StakeRemoved")
         .withArgs(user.address, lpTokenAddress, STAKE_AMOUNT);
