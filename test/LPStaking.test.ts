@@ -61,6 +61,72 @@ describe('LPStaking', function () {
     ({ lpStaking, rewardToken, lpToken, owner, signers } = await loadFixture(deployBaseFixture));
   });
 
+  describe('Ownership Transfer', function () {
+    it('Should expose the deployer as the standard owner', async function () {
+      expect(await lpStaking.owner()).to.equal(owner.address);
+      expect(await lpStaking.pendingOwner()).to.equal(ethers.ZeroAddress);
+    });
+
+    it('Should transfer ownership through the OpenZeppelin two-step flow', async function () {
+      const newOwner = signers[4];
+
+      await expect(lpStaking.connect(owner).transferOwnership(newOwner.address))
+        .to.emit(lpStaking, 'OwnershipTransferStarted')
+        .withArgs(owner.address, newOwner.address);
+
+      expect(await lpStaking.pendingOwner()).to.equal(newOwner.address);
+
+      await expect(lpStaking.connect(newOwner).acceptOwnership())
+        .to.emit(lpStaking, 'OwnershipTransferred')
+        .withArgs(owner.address, newOwner.address);
+
+      expect(await lpStaking.owner()).to.equal(newOwner.address);
+      expect(await lpStaking.pendingOwner()).to.equal(ethers.ZeroAddress);
+
+      await expect(lpStaking.connect(owner).transferOwnership(signers[5].address))
+        .to.be.revertedWithCustomError(lpStaking, 'OwnableUnauthorizedAccount')
+        .withArgs(owner.address);
+    });
+
+    it('Should use zero address to cancel a pending ownership transfer', async function () {
+      const newOwner = signers[4];
+
+      await lpStaking.connect(owner).transferOwnership(newOwner.address);
+
+      await expect(lpStaking.connect(owner).transferOwnership(ethers.ZeroAddress))
+        .to.emit(lpStaking, 'OwnershipTransferStarted')
+        .withArgs(owner.address, ethers.ZeroAddress);
+
+      expect(await lpStaking.pendingOwner()).to.equal(ethers.ZeroAddress);
+    });
+
+    it('Should reject unauthorized ownership transfer initiators', async function () {
+      const adminOnly = signers[0];
+      const newOwner = signers[4];
+
+      await expect(lpStaking.connect(adminOnly).transferOwnership(newOwner.address))
+        .to.be.revertedWithCustomError(lpStaking, 'OwnableUnauthorizedAccount')
+        .withArgs(adminOnly.address);
+    });
+
+    it('Should reject callers that are not the pending owner', async function () {
+      const newOwner = signers[4];
+      const wrongOwner = signers[5];
+
+      await lpStaking.connect(owner).transferOwnership(newOwner.address);
+
+      await expect(lpStaking.connect(wrongOwner).acceptOwnership())
+        .to.be.revertedWithCustomError(lpStaking, 'OwnableUnauthorizedAccount')
+        .withArgs(wrongOwner.address);
+    });
+
+    it('Should reject acceptance when no owner transfer is pending', async function () {
+      await expect(lpStaking.connect(signers[4]).acceptOwnership())
+        .to.be.revertedWithCustomError(lpStaking, 'OwnableUnauthorizedAccount')
+        .withArgs(signers[4].address);
+    });
+  });
+
   describe('Liquidity Pair Management', function () {
     it('Should add a new liquidity pair', async function () {
       const lpTokenAddress = await lpToken.getAddress();
@@ -385,6 +451,44 @@ describe('LPStaking', function () {
       const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
       expect(await lpStaking.hasRole(ADMIN_ROLE, newSigner.address)).to.be.true;
       expect(await lpStaking.hasRole(ADMIN_ROLE, oldSigner.address)).to.be.false;
+    });
+
+    it('Should allow the owner to approve signer changes without ADMIN_ROLE', async function () {
+      const allSigners = await ethers.getSigners();
+      const [owner, admin1, admin2, admin3, admin4, replacementSigner] = allSigners;
+
+      const mockERC20 = await ethers.getContractFactory('MockERC20');
+      const rewardToken = await mockERC20.deploy('Liberdus Token', 'LIB');
+      await rewardToken.waitForDeployment();
+
+      const LPStaking = await ethers.getContractFactory('LPStaking');
+      const staking = await LPStaking.deploy(
+        await rewardToken.getAddress(),
+        [admin1.address, admin2.address, admin3.address, admin4.address]
+      ) as LPStaking;
+      await staking.waitForDeployment();
+
+      const ADMIN_ROLE = await staking.ADMIN_ROLE();
+      expect(await staking.hasRole(ADMIN_ROLE, owner.address)).to.be.false;
+
+      const receipt = await (
+        await staking.connect(admin1).proposeChangeSigner(admin4.address, replacementSigner.address)
+      ).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await expect(staking.connect(owner).approveAction(actionId))
+        .to.emit(staking, 'ActionApproved')
+        .withArgs(actionId, owner.address);
+
+      await staking.connect(admin2).approveAction(actionId);
+
+      await expect(staking.connect(admin1).executeAction(actionId))
+        .to.emit(staking, 'SignerChanged')
+        .withArgs(admin4.address, replacementSigner.address);
+
+      expect(await staking.hasRole(ADMIN_ROLE, replacementSigner.address)).to.be.true;
+      expect(await staking.hasRole(ADMIN_ROLE, admin4.address)).to.be.false;
     });
 
     it('Should withdraw rewards', async function () {
