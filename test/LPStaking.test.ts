@@ -188,6 +188,17 @@ describe('LPStaking', function () {
       expect(pair.isActive).to.be.true;
       expect(pair.weight).to.equal(weight);
     });
+
+    it('Should reject adding the reward token as a liquidity pair', async function () {
+      await expect(
+        lpStaking.proposeAddPair(
+          await rewardToken.getAddress(),
+          'LIB',
+          'Uniswap-V2',
+          ethers.parseEther('7')
+        )
+      ).to.be.revertedWith('Reward token cannot be pair');
+    });
   });
 
   describe('Staking', function () {
@@ -725,6 +736,30 @@ describe('LPStaking', function () {
       expect(tx).to.emit(lpStaking, 'RewardsClaimed').withArgs(freshUser.address, lpTokenAddress);
     });
 
+    it('Should accrue sub-hourly precision for small hourly reward rates', async function () {
+      const tinyHourlyReward = 3599n;
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(tinyHourlyReward)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+      await lpStaking.executeAction(actionId);
+
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const initialBalance = await rewardToken.balanceOf(user1.address);
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
+      const finalBalance = await rewardToken.balanceOf(user1.address);
+
+      const rewardsEarned = finalBalance - initialBalance;
+      expect(rewardsEarned).to.be.gt(0);
+      expect(rewardsEarned).to.be.lte(tinyHourlyReward + 1n);
+    });
+
     it('Should reset reward accumulators when a fully removed pair is re-added', async function () {
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
 
@@ -1068,6 +1103,45 @@ describe('LPStaking', function () {
 
       await expect(lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address))
         .to.emit(lpStaking, 'ActionProposed');
+    });
+
+    it('Should clean up expired actions by bounded range', async function () {
+      const firstReceipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const firstEvent = firstReceipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const firstActionId = (firstEvent as any)?.args?.actionId;
+
+      await ethers.provider.send('evm_increaseTime', [7 * 24 * 60 * 60 + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.cleanupExpiredActions(firstActionId, firstActionId);
+
+      let firstAction = await lpStaking.actions(firstActionId);
+      expect(firstAction.expired).to.be.true;
+
+      const secondReceipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n)).wait();
+      const secondEvent = secondReceipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const secondActionId = (secondEvent as any)?.args?.actionId;
+
+      await ethers.provider.send('evm_increaseTime', [7 * 24 * 60 * 60 + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.cleanupExpiredActions(firstActionId, secondActionId);
+
+      firstAction = await lpStaking.actions(firstActionId);
+      const secondAction = await lpStaking.actions(secondActionId);
+      expect(firstAction.expired).to.be.true;
+      expect(secondAction.expired).to.be.true;
+    });
+
+    it('Should reject invalid expired-action cleanup ranges', async function () {
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE);
+
+      await expect(lpStaking.cleanupExpiredActions(0, 1))
+        .to.be.revertedWith('Invalid start');
+      await expect(lpStaking.cleanupExpiredActions(1, 0))
+        .to.be.revertedWith('Invalid range');
+      await expect(lpStaking.cleanupExpiredActions(1, 2))
+        .to.be.revertedWith('Invalid end');
     });
   });
 
