@@ -604,6 +604,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             });
             activePairs.push(pa.pairToAdd);
             totalWeight += pa.weightToAdd;
+            rewardPerTokenStored[pa.pairToAdd] = 0;
             lastUpdateTime[pa.pairToAdd] = block.timestamp;
             emit PairAdded(pa.pairToAdd, pa.platformToAdd, pa.weightToAdd);
         } else if (pa.actionType == ActionType.REMOVE_PAIR) {
@@ -613,12 +614,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             totalWeight -= pairs[lpToken].weight;
             pairs[lpToken].weight = 0;
 
-            // Only fully remove the pair if TVL is zero
-            if (totalStaked[lpToken] == 0) {
-                pairs[lpToken].isActive = false;
-                pairs[lpToken].lpToken = IERC20(address(0));
-                _removeActivePair(lpToken);
-            }
+            _finalizePairRemovalIfEmpty(lpToken);
 
             emit PairRemoved(lpToken, pa.pairNameToAdd);
         } else if (pa.actionType == ActionType.CHANGE_SIGNER) {
@@ -716,6 +712,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         }
 
         IERC20(lpToken).safeTransfer(receiver, amount);
+        _finalizePairRemovalIfEmpty(lpToken);
 
         emit StakeRemoved(msg.sender, lpToken, amount);
         emit StakeRemovedTo(msg.sender, receiver, lpToken, amount);
@@ -732,13 +729,21 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(receiver != address(0), "Invalid receiver");
 
         LiquidityPair storage pair = pairs[lpToken];
-        require(pair.isActive, "Pair not active");
+        UserStake storage userStake = userStakes[msg.sender][lpToken];
+        require(
+            pair.isActive || userStake.pendingRewards > 0,
+            "Pair not active"
+        );
 
-        updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
+        uint256 rewards;
+        if (pair.isActive) {
+            updateRewardPerToken(lpToken);
+            rewards = earned(msg.sender, lpToken);
+        } else {
+            rewards = userStake.pendingRewards;
+        }
         require(rewards > 0, "No rewards to claim");
 
-        UserStake storage userStake = userStakes[msg.sender][lpToken];
         userStake.pendingRewards = 0;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
 
@@ -755,6 +760,15 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             if (pairs[lpToken].isActive) {
                 updateRewardPerToken(lpToken);
             }
+        }
+    }
+
+    function _finalizePairRemovalIfEmpty(address lpToken) internal {
+        LiquidityPair storage pair = pairs[lpToken];
+        if (pair.isActive && pair.weight == 0 && totalStaked[lpToken] == 0) {
+            pair.isActive = false;
+            pair.lpToken = IERC20(address(0));
+            _removeActivePair(lpToken);
         }
     }
 
