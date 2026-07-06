@@ -204,6 +204,7 @@ describe('LPStaking', function () {
 
       const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       expect(userStake.amount).to.equal(STAKE_AMOUNT);
+      expect(await lpStaking.totalStaked(lpTokenAddress)).to.equal(STAKE_AMOUNT);
     });
 
     it('Should not allow staking below minimum', async function () {
@@ -236,6 +237,29 @@ describe('LPStaking', function () {
       
       const finalContractBalance = await lpToken.balanceOf(contractAddress);
       expect(finalContractBalance - initialContractBalance).to.equal(STAKE_AMOUNT);
+    });
+
+    it('Should credit only the received amount for fee-on-transfer LP tokens', async function () {
+      const feeToken = await ethers.deployContract('MockFeeOnTransferERC20', [
+        'Fee LP Token',
+        'FLP',
+        100,
+      ]);
+      const feeTokenAddress = await feeToken.getAddress();
+      const expectedReceived = (STAKE_AMOUNT * 99n) / 100n;
+
+      await feeToken.mint(user1.address, INITIAL_BALANCE);
+      await feeToken.connect(user1).approve(await lpStaking.getAddress(), INITIAL_BALANCE);
+      await setupPairOnly(lpStaking, feeTokenAddress, signers);
+
+      await expect(lpStaking.connect(user1).stake(feeTokenAddress, STAKE_AMOUNT))
+        .to.emit(lpStaking, 'StakeAdded')
+        .withArgs(user1.address, feeTokenAddress, expectedReceived);
+
+      const userStake = await lpStaking.getUserStakeInfo(user1.address, feeTokenAddress);
+      expect(userStake.amount).to.equal(expectedReceived);
+      expect(await lpStaking.totalStaked(feeTokenAddress)).to.equal(expectedReceived);
+      expect(await feeToken.balanceOf(await lpStaking.getAddress())).to.equal(expectedReceived);
     });
 
     it('Should update lastRewardTime on stake', async function () {
@@ -290,6 +314,7 @@ describe('LPStaking', function () {
       const finalBalance = await lpToken.balanceOf(user1.address);
       
       expect(finalBalance - initialBalance).to.equal(STAKE_AMOUNT);
+      expect(await lpStaking.totalStaked(lpTokenAddress)).to.equal(0);
     });
 
     it('Should allow partial unstaking LP tokens to a different receiver', async function () {
@@ -314,6 +339,7 @@ describe('LPStaking', function () {
 
       const userStake = await lpStaking.getUserStakeInfo(user1.address, lpTokenAddress);
       expect(userStake.amount).to.equal(STAKE_AMOUNT - partialAmount);
+      expect(await lpStaking.totalStaked(lpTokenAddress)).to.equal(STAKE_AMOUNT - partialAmount);
       expect(await lpToken.balanceOf(user1.address)).to.equal(initialUserBalance);
       expect(await lpToken.balanceOf(receiver.address)).to.equal(initialReceiverBalance + partialAmount);
     });
@@ -583,6 +609,40 @@ describe('LPStaking', function () {
       const rewardsEarned = finalBalance - initialBalance;
       const tolerance = HOURLY_REWARD / 1000n; // 0.1% tolerance
       expect(rewardsEarned).to.be.closeTo(HOURLY_REWARD, tolerance);
+    });
+
+    it('Should not dilute rewards from direct LP token transfers', async function () {
+      const directSender = signers[0];
+      await lpToken.mint(directSender.address, STAKE_AMOUNT);
+
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+      await lpToken.connect(directSender).transfer(await lpStaking.getAddress(), STAKE_AMOUNT);
+
+      expect(await lpToken.balanceOf(await lpStaking.getAddress())).to.equal(STAKE_AMOUNT * 2n);
+      expect(await lpStaking.totalStaked(lpTokenAddress)).to.equal(STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const initialBalance = await rewardToken.balanceOf(user1.address);
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
+      const finalBalance = await rewardToken.balanceOf(user1.address);
+
+      expect(finalBalance - initialBalance).to.be.closeTo(HOURLY_REWARD, HOURLY_REWARD / 1000n);
+    });
+
+    it('Should not accrue phantom obligations from direct LP token transfers without stake', async function () {
+      const directSender = signers[0];
+      await lpToken.mint(directSender.address, STAKE_AMOUNT);
+      await lpToken.connect(directSender).transfer(await lpStaking.getAddress(), STAKE_AMOUNT);
+
+      expect(await lpToken.balanceOf(await lpStaking.getAddress())).to.equal(STAKE_AMOUNT);
+      expect(await lpStaking.totalStaked(lpTokenAddress)).to.equal(0);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      expect(await lpStaking.getTotalRewardObligation()).to.equal(0);
     });
 
     it('Should allow claiming small rewards', async function () {

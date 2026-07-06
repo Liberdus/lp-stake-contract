@@ -81,6 +81,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     // Reward tracking state
     mapping(address => uint256) public rewardPerTokenStored;
     mapping(address => uint256) public lastUpdateTime;
+    mapping(address => uint256) public totalStaked;
     uint256 public totalWeight;
     uint256 public actionCounter;
     uint256 public totalRewardsObligated;
@@ -165,7 +166,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
         if (
             block.timestamp > lastUpdateTime[lpToken] &&
-            IERC20(lpToken).balanceOf(address(this)) > 0 &&
+            totalStaked[lpToken] > 0 &&
             totalWeight > 0
         ) {
             uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
@@ -175,7 +176,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
                 pairs[lpToken].weight) / totalWeight;
             currentRewardPerToken +=
                 (pairRewards * PRECISION) /
-                IERC20(lpToken).balanceOf(address(this));
+                totalStaked[lpToken];
         }
 
         return
@@ -258,7 +259,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             address lpToken = activePairs[i];
             if (
                 pairs[lpToken].isActive &&
-                IERC20(lpToken).balanceOf(address(this)) > 0 &&
+                totalStaked[lpToken] > 0 &&
                 totalWeight > 0
             ) {
                 uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
@@ -298,12 +299,18 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             userStake.pendingRewards = earned(msg.sender, lpToken);
         }
 
-        userStake.amount += amount;
+        uint256 balanceBefore = IERC20(lpToken).balanceOf(address(this));
+        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = IERC20(lpToken).balanceOf(address(this)) - balanceBefore;
+        require(received >= MIN_STAKE, "Received amount too low");
+        require(received <= type(uint128).max, "Stake amount too high");
+
+        userStake.amount += received;
+        totalStaked[lpToken] += received;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         userStake.lastRewardTime = uint64(block.timestamp);
 
-        IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
-        emit StakeAdded(msg.sender, lpToken, amount);
+        emit StakeAdded(msg.sender, lpToken, received);
     }
 
     function unstake(
@@ -607,7 +614,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             pairs[lpToken].weight = 0;
 
             // Only fully remove the pair if TVL is zero
-            if (IERC20(lpToken).balanceOf(address(this)) == 0) {
+            if (totalStaked[lpToken] == 0) {
                 pairs[lpToken].isActive = false;
                 pairs[lpToken].lpToken = IERC20(address(0));
                 _removeActivePair(lpToken);
@@ -699,6 +706,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         } else {
             userStake.amount -= amount;
         }
+        totalStaked[lpToken] -= amount;
 
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         if (shouldClaimRewards && rewards > 0) {
@@ -751,7 +759,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     }
 
     function updateRewardPerToken(address lpToken) internal {
-        uint256 totalSupply = IERC20(lpToken).balanceOf(address(this));
+        uint256 totalSupply = totalStaked[lpToken];
         uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
 
         if (totalSupply > 0 && timeDelta > 0 && totalWeight > 0) {
