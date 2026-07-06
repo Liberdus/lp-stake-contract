@@ -733,6 +733,91 @@ describe('LPStaking', function () {
         const balance = await rewardToken.balanceOf(signers[1].address);
         expect(balance).to.equal(STAKE_AMOUNT);
     });
+
+    it('Should reject duplicate initial signers', async function () {
+      const LPStaking = await ethers.getContractFactory('LPStaking');
+
+      await expect(
+        LPStaking.deploy(await rewardToken.getAddress(), [
+          owner.address,
+          owner.address,
+          signers[0].address,
+          signers[1].address,
+        ])
+      ).to.be.revertedWith('Duplicate signer');
+    });
+
+    it('Should not let one signer permanently reject an action', async function () {
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await expect(lpStaking.connect(signers[2]).rejectAction(actionId))
+        .to.emit(lpStaking, 'ActionRejected')
+        .withArgs(actionId, signers[2].address);
+
+      const actionAfterOneRejection = await lpStaking.actions(actionId);
+      expect(actionAfterOneRejection.rejections).to.equal(1);
+      expect(actionAfterOneRejection.rejected).to.be.false;
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+
+      await expect(lpStaking.executeAction(actionId))
+        .to.emit(lpStaking, 'HourlyRateUpdated')
+        .withArgs(NEW_RATE);
+    });
+
+    it('Should only mark an action rejected after the rejection threshold', async function () {
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).rejectAction(actionId);
+      await lpStaking.connect(signers[1]).rejectAction(actionId);
+
+      let action = await lpStaking.actions(actionId);
+      expect(action.rejections).to.equal(2);
+      expect(action.rejected).to.be.false;
+
+      await lpStaking.connect(signers[2]).rejectAction(actionId);
+
+      action = await lpStaking.actions(actionId);
+      expect(action.rejections).to.equal(3);
+      expect(action.rejected).to.be.true;
+
+      await expect(lpStaking.connect(signers[0]).executeAction(actionId))
+        .to.be.revertedWith('Action was rejected');
+    });
+
+    it('Should prevent signers from approving after rejecting', async function () {
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).rejectAction(actionId);
+
+      await expect(lpStaking.connect(signers[0]).approveAction(actionId))
+        .to.be.revertedWith('Cannot approve after rejecting');
+    });
+
+    it('Should prevent signers from rejecting after approving', async function () {
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+
+      await expect(lpStaking.connect(signers[0]).rejectAction(actionId))
+        .to.be.revertedWith('Cannot reject after approving');
+    });
+
+    it('Should prevent direct ADMIN_ROLE renounce to keep signer state in sync', async function () {
+      const ADMIN_ROLE = await lpStaking.ADMIN_ROLE();
+
+      await expect(lpStaking.connect(owner).renounceRole(ADMIN_ROLE, owner.address))
+        .to.be.revertedWith('ADMIN_ROLE cannot be renounced');
+    });
   });
 
   describe('Reward Obligation Tracking', function () {

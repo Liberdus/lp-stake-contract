@@ -17,6 +17,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
     uint256 public constant MAX_PAIRS = 100;
     uint256 public constant REQUIRED_APPROVALS = 3;
+    uint256 public constant REQUIRED_REJECTIONS = 3;
     uint256 private constant SECONDS_PER_HOUR = 3600;
     uint256 private constant ACTION_EXPIRY = 7 days; // Actions expire after 7 days
 
@@ -61,7 +62,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         bool executed;
         bool expired;
         uint8 approvals;
+        uint8 rejections;
         address[] approvedBy;
+        address[] rejectedBy;
         uint256 proposedTime; // Timestamp when action was proposed
         bool rejected;
     }
@@ -114,6 +117,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
         for (uint i = 0; i < _initialSigners.length; i++) {
             require(_initialSigners[i] != address(0), "Invalid signer address");
+            for (uint j = i + 1; j < _initialSigners.length; j++) {
+                require(_initialSigners[i] != _initialSigners[j], "Duplicate signer");
+            }
             _grantRole(ADMIN_ROLE, _initialSigners[i]);
         }
     }
@@ -135,6 +141,12 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 actionId
     ) external view returns (address[] memory) {
         return actions[actionId].approvedBy;
+    }
+
+    function getActionRejection(
+        uint256 actionId
+    ) external view returns (address[] memory) {
+        return actions[actionId].rejectedBy;
     }
 
     function isActionExpired(uint256 actionId) public view returns (bool) {
@@ -495,6 +507,11 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         _approveActionInternal(actionId);
     }
 
+    function renounceRole(bytes32 role, address callerConfirmation) public override {
+        require(role != ADMIN_ROLE, "ADMIN_ROLE cannot be renounced");
+        super.renounceRole(role, callerConfirmation);
+    }
+
     function executeAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
@@ -618,7 +635,17 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             );
         }
 
-        pa.rejected = true;
+        for (uint i = 0; i < pa.rejectedBy.length; i++) {
+            require(pa.rejectedBy[i] != msg.sender, "Already rejected");
+        }
+
+        pa.rejectedBy.push(msg.sender);
+        pa.rejections++;
+
+        if (pa.rejections >= REQUIRED_REJECTIONS) {
+            pa.rejected = true;
+        }
+
         emit ActionRejected(actionId, msg.sender);
     }
 
@@ -734,6 +761,10 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         // Check if already approved
         for (uint i = 0; i < pa.approvedBy.length; i++) {
             require(pa.approvedBy[i] != msg.sender, "Already approved");
+        }
+
+        for (uint i = 0; i < pa.rejectedBy.length; i++) {
+            require(pa.rejectedBy[i] != msg.sender, "Cannot approve after rejecting");
         }
 
         pa.approvedBy.push(msg.sender);
