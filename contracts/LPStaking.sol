@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     using SafeERC20 for IERC20;
@@ -156,10 +157,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             totalWeight > 0
         ) {
             uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond *
-                timeDelta *
-                pairs[lpToken].weight) / totalWeight;
+            uint256 pairRewards = _calculatePairRewards(lpToken, timeDelta);
             currentRewardPerToken +=
                 (pairRewards * PRECISION) /
                 totalStaked[lpToken];
@@ -250,10 +248,10 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             ) {
                 uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
                 if (timeDelta > 0) {
-                    uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-                    uint256 pairRewards = (rewardPerSecond *
-                        timeDelta *
-                        pairs[lpToken].weight) / totalWeight;
+                    uint256 pairRewards = _calculatePairRewards(
+                        lpToken,
+                        timeDelta
+                    );
                     pending += pairRewards;
                 }
             }
@@ -329,8 +327,15 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         emit ActionExpired(actionId);
     }
 
-    function cleanupExpiredActions() external onlyRole(ADMIN_ROLE) {
-        for (uint256 i = 1; i <= actionCounter; i++) {
+    function cleanupExpiredActions(
+        uint256 start,
+        uint256 end
+    ) external onlyRole(ADMIN_ROLE) {
+        require(start > 0, "Invalid start");
+        require(end >= start, "Invalid range");
+        require(end <= actionCounter, "Invalid end");
+
+        for (uint256 i = start; i <= end; i++) {
             PendingAction storage pa = actions[i];
             if (!pa.executed && !pa.expired && isActionExpired(i)) {
                 pa.expired = true;
@@ -423,6 +428,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 weight
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpToken != address(0), "Invalid pair");
+        require(lpToken != address(rewardToken), "Reward token cannot be pair");
         require(weight > 0, "Weight must be greater than 0");
         require(weight <= MAX_WEIGHT, "Weight exceeds maximum");
         require(bytes(pairName).length > 0, "Empty pair name");
@@ -544,6 +550,10 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             require(
                 pairs[pa.pairToAdd].lpToken == IERC20(address(0)),
                 "Pair already exists"
+            );
+            require(
+                pa.pairToAdd != address(rewardToken),
+                "Reward token cannot be pair"
             );
             require(activePairs.length < MAX_PAIRS, "Too many pairs");
             require(pa.weightToAdd <= MAX_WEIGHT, "Weight too high");
@@ -722,10 +732,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
 
         if (totalSupply > 0 && timeDelta > 0 && totalWeight > 0) {
-            uint256 rewardPerSecond = hourlyRewardRate / SECONDS_PER_HOUR;
-            uint256 pairRewards = (rewardPerSecond *
-                timeDelta *
-                pairs[lpToken].weight) / totalWeight;
+            uint256 pairRewards = _calculatePairRewards(lpToken, timeDelta);
             rewardPerTokenStored[lpToken] +=
                 (pairRewards * PRECISION) /
                 totalSupply;
@@ -735,12 +742,16 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         lastUpdateTime[lpToken] = block.timestamp;
     }
 
-    function updateRewards(address user, address lpToken) internal {
-        updateRewardPerToken(lpToken);
-        UserStake storage userStake = userStakes[user][lpToken];
-        userStake.pendingRewards = earned(user, lpToken);
-        userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
-        userStake.lastRewardTime = uint64(block.timestamp);
+    function _calculatePairRewards(
+        address lpToken,
+        uint256 timeDelta
+    ) internal view returns (uint256) {
+        uint256 elapsedRewards = Math.mulDiv(
+            hourlyRewardRate,
+            timeDelta,
+            SECONDS_PER_HOUR
+        );
+        return Math.mulDiv(elapsedRewards, pairs[lpToken].weight, totalWeight);
     }
 
     function _approveActionInternal(uint256 actionId) internal {
