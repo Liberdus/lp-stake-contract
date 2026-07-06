@@ -816,5 +816,78 @@ describe('LPStaking', function () {
       const remainingObligation = await lpStaking.getTotalRewardObligation();
       expect(remainingObligation).to.be.closeTo(HOURLY_REWARD / 2n, HOURLY_REWARD / 1000n);
     });
+
+    it('Should report reward surplus after reserving obligations', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const obligation = await lpStaking.getTotalRewardObligation();
+      const surplus = await lpStaking.getAvailableRewardSurplus();
+      const rewardBalance = await rewardToken.balanceOf(await lpStaking.getAddress());
+
+      expect(obligation).to.be.closeTo(HOURLY_REWARD, HOURLY_REWARD / 1000n);
+      expect(surplus).to.equal(rewardBalance - obligation);
+    });
+
+    it('Should reject reward withdrawals that exceed surplus at proposal time', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const surplus = await lpStaking.getAvailableRewardSurplus();
+
+      await expect(
+        lpStaking.proposeWithdrawRewards(signers[1].address, surplus + 1n)
+      ).to.be.revertedWith('Amount exceeds surplus rewards');
+    });
+
+    it('Should reject reward withdrawals that exceed surplus at execution time', async function () {
+      const receipt = await (
+        await lpStaking.proposeWithdrawRewards(signers[1].address, REWARD_SUPPLY)
+      ).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+
+      await expect(lpStaking.executeAction(actionId))
+        .to.be.revertedWith('Amount exceeds surplus rewards');
+    });
+
+    it('Should preserve claim solvency after withdrawing only surplus rewards', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const surplus = await lpStaking.getAvailableRewardSurplus();
+      const withdrawalBuffer = ethers.parseEther('1');
+      const withdrawAmount = surplus - withdrawalBuffer;
+
+      const receipt = await (
+        await lpStaking.proposeWithdrawRewards(signers[1].address, withdrawAmount)
+      ).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+      await lpStaking.executeAction(actionId);
+
+      const initialUserRewardBalance = await rewardToken.balanceOf(user1.address);
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
+      const finalUserRewardBalance = await rewardToken.balanceOf(user1.address);
+
+      expect(finalUserRewardBalance).to.be.gt(initialUserRewardBalance);
+    });
   });
 });

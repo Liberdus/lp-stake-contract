@@ -238,7 +238,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         return stakesArray;
     }
 
-    function getTotalRewardObligation() external view returns (uint256) {
+    function getTotalRewardObligation() public view returns (uint256) {
         uint256 pending = 0;
         for (uint i = 0; i < activePairs.length; i++) {
             address lpToken = activePairs[i];
@@ -258,6 +258,15 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             }
         }
         return totalRewardsObligated + pending;
+    }
+
+    function getAvailableRewardSurplus() public view returns (uint256) {
+        uint256 balance = rewardToken.balanceOf(address(this));
+        uint256 obligation = getTotalRewardObligation();
+        if (balance <= obligation) {
+            return 0;
+        }
+        return balance - obligation;
     }
 
     // ============ User Actions ============
@@ -339,8 +348,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(recipient != address(0), "Invalid recipient address");
         require(amount > 0, "Amount must be greater than zero");
         require(
-            amount <= rewardToken.balanceOf(address(this)),
-            "Amount exceeds contract balance"
+            amount <= getAvailableRewardSurplus(),
+            "Amount exceeds surplus rewards"
         );
         require(amount <= type(uint128).max, "Amount too large");
 
@@ -588,8 +597,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         } else if (pa.actionType == ActionType.WITHDRAW_REWARDS) {
             require(pa.recipient != address(0), "Invalid recipient");
             require(
-                rewardToken.balanceOf(address(this)) >= pa.withdrawAmount,
-                "Insufficient contract balance"
+                pa.withdrawAmount <= getAvailableRewardSurplus(),
+                "Amount exceeds surplus rewards"
             );
 
             rewardToken.safeTransfer(pa.recipient, pa.withdrawAmount);
