@@ -72,6 +72,13 @@ describe('LPStaking', function () {
     return actionId;
   }
 
+  async function approveAndExecuteAction(lpStaking: LPStaking, actionId: bigint, signers: SignerWithAddress[]) {
+    for (let i = 0; i < 2; i++) {
+      await lpStaking.connect(signers[i]).approveAction(actionId);
+    }
+    await lpStaking.executeAction(actionId);
+  }
+
   async function deployUnderfundedStakedFixture() {
     const { lpStaking, lpToken, signers } = await deployBaseFixture();
     const lpTokenAddress = await lpToken.getAddress();
@@ -578,6 +585,51 @@ describe('LPStaking', function () {
       const finalUserBalance = await rewardToken.balanceOf(user1.address);
       expect(finalUserBalance - initialUserBalance).to.equal(userStakeStruct.pendingRewards);
     });
+
+    it('Should allow claiming pending rewards after a pair is fully removed', async function () {
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false);
+      const pendingRewards = (await lpStaking.userStakes(user1.address, lpTokenAddress)).pendingRewards;
+      expect(pendingRewards).to.be.gt(0);
+
+      const receipt = await (await lpStaking.proposeRemovePair(lpTokenAddress)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+      await approveAndExecuteAction(lpStaking, actionId, signers);
+
+      const pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.isActive).to.be.false;
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      const initialRewardBalance = await rewardToken.balanceOf(user1.address);
+      await expect(lpStaking.connect(user1).claimRewards(lpTokenAddress))
+        .to.emit(lpStaking, 'RewardsClaimed')
+        .withArgs(user1.address, lpTokenAddress, pendingRewards);
+
+      expect(await rewardToken.balanceOf(user1.address)).to.equal(initialRewardBalance + pendingRewards);
+    });
+
+    it('Should finalize a removed pair after the last stake exits', async function () {
+      const receipt = await (await lpStaking.proposeRemovePair(lpTokenAddress)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+      await approveAndExecuteAction(lpStaking, actionId, signers);
+
+      let pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.isActive).to.be.true;
+      expect(pair.weight).to.equal(0);
+
+      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false);
+
+      pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.isActive).to.be.false;
+      expect(pair.token).to.equal(ethers.ZeroAddress);
+      expect(await lpStaking.getActivePairs()).to.not.include(lpTokenAddress);
+    });
   });
 
   describe('Rewards', function () {
@@ -671,6 +723,38 @@ describe('LPStaking', function () {
       
       // Check that the event was emitted (without checking exact amount)
       expect(tx).to.emit(lpStaking, 'RewardsClaimed').withArgs(freshUser.address, lpTokenAddress);
+    });
+
+    it('Should reset reward accumulators when a fully removed pair is re-added', async function () {
+      await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
+
+      await ethers.provider.send('evm_increaseTime', [3600]);
+      await ethers.provider.send('evm_mine', []);
+
+      await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false);
+      expect(await lpStaking.rewardPerTokenStored(lpTokenAddress)).to.be.gt(0);
+
+      let receipt = await (await lpStaking.proposeRemovePair(lpTokenAddress)).wait();
+      let event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      let actionId = (event as any)?.args?.actionId;
+      await approveAndExecuteAction(lpStaking, actionId, signers);
+
+      let pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.isActive).to.be.false;
+
+      receipt = await (
+        await lpStaking.proposeAddPair(lpTokenAddress, 'LIB-USDT', 'Uniswap-V2', ethers.parseEther('7'))
+      ).wait();
+      event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      actionId = (event as any)?.args?.actionId;
+      await approveAndExecuteAction(lpStaking, actionId, signers);
+
+      pair = await lpStaking.getPairInfo(lpTokenAddress);
+      expect(pair.isActive).to.be.true;
+      expect(await lpStaking.rewardPerTokenStored(lpTokenAddress)).to.equal(0);
+
+      const latestBlock = await ethers.provider.getBlock('latest');
+      expect(await lpStaking.lastUpdateTime(lpTokenAddress)).to.equal(latestBlock?.timestamp);
     });
   });
 
