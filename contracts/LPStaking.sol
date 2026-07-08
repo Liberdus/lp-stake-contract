@@ -508,7 +508,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         _approveActionInternal(actionId);
     }
 
-    function executeAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+    function executeAction(uint256 actionId) external nonReentrant onlyRole(ADMIN_ROLE) {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
@@ -519,6 +519,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
         );
+
+        pa.executed = true;
 
         if (
             pa.actionType == ActionType.ADD_PAIR ||
@@ -609,7 +611,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             emit RewardsWithdrawn(pa.recipient, pa.withdrawAmount);
         }
 
-        pa.executed = true;
         emit ActionExecuted(actionId);
     }
 
