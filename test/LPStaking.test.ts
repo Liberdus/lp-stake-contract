@@ -911,6 +911,9 @@ describe('LPStaking', function () {
 
         const balance = await rewardToken.balanceOf(signers[1].address);
         expect(balance).to.equal(STAKE_AMOUNT);
+
+        const action = await lpStaking.actions(actionId);
+        expect(action.executed).to.be.true;
     });
 
     it('Should reject duplicate initial signers', async function () {
