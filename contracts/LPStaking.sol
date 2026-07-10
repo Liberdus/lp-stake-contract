@@ -84,6 +84,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     uint256 public totalWeight;
     uint256 public actionCounter;
     uint256 public totalRewardsObligated;
+    uint256 public pendingActionCount;
+    uint256 public pendingChangeSignerActionId;
     mapping(uint256 => PendingAction) public actions;
 
     // ============ Events ============
@@ -328,17 +330,20 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Action already executed");
         require(!pa.expired, "Action already marked expired");
+        require(!pa.rejected, "Action was rejected");
         require(isActionExpired(actionId), "Action not expired yet");
 
         pa.expired = true;
+        _closePendingAction(actionId);
         emit ActionExpired(actionId);
     }
 
     function cleanupExpiredActions() external onlyRole(ADMIN_ROLE) {
         for (uint256 i = 1; i <= actionCounter; i++) {
             PendingAction storage pa = actions[i];
-            if (!pa.executed && !pa.expired && isActionExpired(i)) {
+            if (!pa.executed && !pa.expired && !pa.rejected && isActionExpired(i)) {
                 pa.expired = true;
+                _closePendingAction(i);
                 emit ActionExpired(i);
             }
         }
@@ -355,6 +360,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             "Amount exceeds contract balance"
         );
         require(amount <= type(uint128).max, "Amount too large");
+        _requireCanPropose(ActionType.WITHDRAW_REWARDS);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -368,6 +374,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             msg.sender,
             ActionType.WITHDRAW_REWARDS
         );
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -376,6 +383,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(newRate <= type(uint128).max, "Rate too high");
+        _requireCanPropose(ActionType.SET_HOURLY_REWARD_RATE);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -388,6 +396,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             msg.sender,
             ActionType.SET_HOURLY_REWARD_RATE
         );
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -404,6 +413,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             require(weights[i] <= MAX_WEIGHT, "Weight exceeds maximum");
             require(lpTokens[i] != address(0), "Invalid LP token address");
         }
+        _requireCanPropose(ActionType.UPDATE_PAIR_WEIGHTS);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -417,6 +427,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             msg.sender,
             ActionType.UPDATE_PAIR_WEIGHTS
         );
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -434,6 +445,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(bytes(pairName).length <= 32, "Pair name too long");
         require(bytes(platform).length > 0, "Empty platform name");
         require(bytes(platform).length <= 32, "Platform name too long");
+        _requireCanPropose(ActionType.ADD_PAIR);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -445,6 +457,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         pa.proposedTime = block.timestamp;
 
         emit ActionProposed(actionCounter, msg.sender, ActionType.ADD_PAIR);
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -454,6 +467,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpToken != address(0), "Invalid pair address");
         require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
+        _requireCanPropose(ActionType.REMOVE_PAIR);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -463,6 +477,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         pa.pairNameToAdd = pairs[lpToken].pairName; // Reusing field for event info
 
         emit ActionProposed(actionCounter, msg.sender, ActionType.REMOVE_PAIR);
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -474,6 +489,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
         require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
         require(newSigner != address(0), "Invalid new signer");
+        _requireCanPropose(ActionType.CHANGE_SIGNER);
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -487,6 +503,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             msg.sender,
             ActionType.CHANGE_SIGNER
         );
+        _openPendingAction(actionCounter);
         _approveActionInternal(actionCounter);
         return actionCounter;
     }
@@ -614,6 +631,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         }
 
         pa.executed = true;
+        _closePendingAction(actionId);
         emit ActionExecuted(actionId);
     }
 
@@ -644,6 +662,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
         if (pa.rejections >= REQUIRED_REJECTIONS) {
             pa.rejected = true;
+            _closePendingAction(actionId);
         }
 
         emit ActionRejected(actionId, msg.sender);
@@ -746,6 +765,33 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         userStake.pendingRewards = earned(user, lpToken);
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
         userStake.lastRewardTime = uint64(block.timestamp);
+    }
+
+    function _requireCanPropose(ActionType actionType) internal view {
+        if (actionType == ActionType.CHANGE_SIGNER) {
+            require(pendingActionCount == 0, "Pending action exists");
+        } else {
+            require(
+                pendingChangeSignerActionId == 0,
+                "Pending signer change exists"
+            );
+        }
+    }
+
+    function _openPendingAction(uint256 actionId) internal {
+        pendingActionCount++;
+        if (actions[actionId].actionType == ActionType.CHANGE_SIGNER) {
+            pendingChangeSignerActionId = actionId;
+        }
+    }
+
+    function _closePendingAction(uint256 actionId) internal {
+        if (pendingActionCount > 0) {
+            pendingActionCount--;
+        }
+        if (pendingChangeSignerActionId == actionId) {
+            pendingChangeSignerActionId = 0;
+        }
     }
 
     function _approveActionInternal(uint256 actionId) internal {

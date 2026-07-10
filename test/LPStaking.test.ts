@@ -818,6 +818,91 @@ describe('LPStaking', function () {
       await expect(lpStaking.connect(owner).renounceRole(ADMIN_ROLE, owner.address))
         .to.be.revertedWith('ADMIN_ROLE cannot be renounced');
     });
+
+    it('Should block signer changes while a normal action is pending', async function () {
+      const oldSigner = signers[0];
+      const replacementSigner = signers[4];
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      expect(await lpStaking.pendingActionCount()).to.equal(1);
+
+      await expect(
+        lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
+      ).to.be.revertedWith('Pending action exists');
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+      await lpStaking.executeAction(actionId);
+
+      expect(await lpStaking.pendingActionCount()).to.equal(0);
+
+      await expect(lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address))
+        .to.emit(lpStaking, 'ActionProposed');
+    });
+
+    it('Should block normal actions and additional signer changes while a signer change is pending', async function () {
+      const oldSigner = signers[0];
+      const replacementSigner = signers[4];
+      const receipt = await (
+        await lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
+      ).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      expect(await lpStaking.pendingActionCount()).to.equal(1);
+      expect(await lpStaking.pendingChangeSignerActionId()).to.equal(actionId);
+
+      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE))
+        .to.be.revertedWith('Pending signer change exists');
+
+      await expect(
+        lpStaking.proposeChangeSigner(signers[1].address, signers[5].address)
+      ).to.be.revertedWith('Pending action exists');
+    });
+
+    it('Should unblock proposals after a pending action is rejected', async function () {
+      const oldSigner = signers[0];
+      const replacementSigner = signers[4];
+      const receipt = await (
+        await lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
+      ).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await lpStaking.connect(signers[0]).rejectAction(actionId);
+      await lpStaking.connect(signers[1]).rejectAction(actionId);
+      await lpStaking.connect(signers[2]).rejectAction(actionId);
+
+      expect(await lpStaking.pendingActionCount()).to.equal(0);
+      expect(await lpStaking.pendingChangeSignerActionId()).to.equal(0);
+
+      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE))
+        .to.emit(lpStaking, 'ActionProposed');
+    });
+
+    it('Should require expired actions to be marked expired before they stop blocking signer changes', async function () {
+      const oldSigner = signers[0];
+      const replacementSigner = signers[4];
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      await ethers.provider.send('evm_increaseTime', [7 * 24 * 60 * 60 + 1]);
+      await ethers.provider.send('evm_mine', []);
+
+      await expect(
+        lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
+      ).to.be.revertedWith('Pending action exists');
+
+      await lpStaking.handleExpiredAction(actionId);
+
+      expect(await lpStaking.pendingActionCount()).to.equal(0);
+
+      await expect(lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address))
+        .to.emit(lpStaking, 'ActionProposed');
+    });
   });
 
   describe('Reward Obligation Tracking', function () {
