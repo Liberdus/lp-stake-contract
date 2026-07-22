@@ -774,20 +774,23 @@ describe('LPStaking', function () {
       const actionId = (event as any)?.args?.actionId;
 
       await lpStaking.connect(signers[0]).rejectAction(actionId);
-      await lpStaking.connect(signers[1]).rejectAction(actionId);
 
       let action = await lpStaking.actions(actionId);
-      expect(action.rejections).to.equal(2);
+      expect(action.rejections).to.equal(1);
       expect(action.rejected).to.be.false;
 
-      await lpStaking.connect(signers[2]).rejectAction(actionId);
+      await lpStaking.connect(signers[1]).rejectAction(actionId);
 
       action = await lpStaking.actions(actionId);
-      expect(action.rejections).to.equal(3);
+      expect(action.rejections).to.equal(2);
       expect(action.rejected).to.be.true;
 
       await expect(lpStaking.connect(signers[0]).executeAction(actionId))
         .to.be.revertedWith('Action was rejected');
+    });
+
+    it('Should use a two-signer rejection threshold', async function () {
+      expect(await lpStaking.REQUIRED_REJECTIONS()).to.equal(2);
     });
 
     it('Should prevent signers from approving after rejecting', async function () {
@@ -842,6 +845,26 @@ describe('LPStaking', function () {
         .to.emit(lpStaking, 'ActionProposed');
     });
 
+    it('Should block normal proposals while any action is pending', async function () {
+      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
+      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
+      const actionId = (event as any)?.args?.actionId;
+
+      expect(await lpStaking.pendingActionCount()).to.equal(1);
+
+      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n))
+        .to.be.revertedWith('Pending action exists');
+
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+      await lpStaking.executeAction(actionId);
+
+      expect(await lpStaking.pendingActionCount()).to.equal(0);
+
+      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n))
+        .to.emit(lpStaking, 'ActionProposed');
+    });
+
     it('Should block normal actions and additional signer changes while a signer change is pending', async function () {
       const oldSigner = signers[0];
       const replacementSigner = signers[4];
@@ -855,7 +878,7 @@ describe('LPStaking', function () {
       expect(await lpStaking.pendingChangeSignerActionId()).to.equal(actionId);
 
       await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE))
-        .to.be.revertedWith('Pending signer change exists');
+        .to.be.revertedWith('Pending action exists');
 
       await expect(
         lpStaking.proposeChangeSigner(signers[1].address, signers[5].address)
@@ -873,7 +896,6 @@ describe('LPStaking', function () {
 
       await lpStaking.connect(signers[0]).rejectAction(actionId);
       await lpStaking.connect(signers[1]).rejectAction(actionId);
-      await lpStaking.connect(signers[2]).rejectAction(actionId);
 
       expect(await lpStaking.pendingActionCount()).to.equal(0);
       expect(await lpStaking.pendingChangeSignerActionId()).to.equal(0);
