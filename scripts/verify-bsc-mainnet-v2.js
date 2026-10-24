@@ -2,6 +2,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { loadDeploymentConfig } = require("./deployment-config.cjs");
 
 async function main() {
   const contractAddress = process.argv[2];
@@ -9,21 +10,11 @@ async function main() {
     throw new Error("Usage: node scripts/verify-bsc-mainnet-v2.js <contractAddress>");
   }
 
+  const { rewardToken, initialSigners } = loadDeploymentConfig("BSC_MAINNET");
+
   const apiKey = process.env.ETHERSCAN_API_KEY;
   if (!apiKey) {
     throw new Error("Missing ETHERSCAN_API_KEY");
-  }
-
-  const rewardToken = process.env.BSC_MAINNET_REWARD_TOKEN;
-  const initialSigners = [
-    process.env.BSC_MAINNET_SIGNER_1,
-    process.env.BSC_MAINNET_SIGNER_2,
-    process.env.BSC_MAINNET_SIGNER_3,
-    process.env.BSC_MAINNET_SIGNER_4,
-  ];
-
-  if (!rewardToken || initialSigners.some((value) => !value)) {
-    throw new Error("Missing BSC mainnet constructor env vars");
   }
 
   const constructorArguments = ethers.AbiCoder.defaultAbiCoder()

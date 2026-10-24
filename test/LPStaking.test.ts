@@ -760,14 +760,16 @@ describe('LPStaking', function () {
       expect(rewardsEarned).to.be.lte(tinyHourlyReward + 1n);
     });
 
-    it('Should reset reward accumulators when a fully removed pair is re-added', async function () {
+    it('Should preserve reward accumulators and saved claims when a fully removed pair is re-added', async function () {
       await lpStaking.connect(user1).stake(lpTokenAddress, STAKE_AMOUNT);
 
       await ethers.provider.send('evm_increaseTime', [3600]);
       await ethers.provider.send('evm_mine', []);
 
       await lpStaking.connect(user1).unstake(lpTokenAddress, STAKE_AMOUNT, false);
-      expect(await lpStaking.rewardPerTokenStored(lpTokenAddress)).to.be.gt(0);
+      const savedAccumulator = await lpStaking.rewardPerTokenStored(lpTokenAddress);
+      const savedRewards = await lpStaking.earned(user1.address, lpTokenAddress);
+      expect(savedAccumulator).to.be.gt(0);
 
       let receipt = await (await lpStaking.proposeRemovePair(lpTokenAddress)).wait();
       let event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
@@ -786,10 +788,11 @@ describe('LPStaking', function () {
 
       pair = await lpStaking.getPairInfo(lpTokenAddress);
       expect(pair.isActive).to.be.true;
-      expect(await lpStaking.rewardPerTokenStored(lpTokenAddress)).to.equal(0);
+      expect(await lpStaking.rewardPerTokenStored(lpTokenAddress)).to.equal(savedAccumulator);
+      expect(await lpStaking.earned(user1.address, lpTokenAddress)).to.equal(savedRewards);
+      await lpStaking.connect(user1).claimRewards(lpTokenAddress);
 
-      const latestBlock = await ethers.provider.getBlock('latest');
-      expect(await lpStaking.lastUpdateTime(lpTokenAddress)).to.equal(latestBlock?.timestamp);
+      expect(await lpStaking.earned(user1.address, lpTokenAddress)).to.equal(0);
     });
   });
 
@@ -1004,67 +1007,39 @@ describe('LPStaking', function () {
         .to.be.revertedWith('ADMIN_ROLE cannot be renounced');
     });
 
-    it('Should block signer changes while a normal action is pending', async function () {
-      const oldSigner = signers[0];
-      const replacementSigner = signers[4];
-      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
-      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
-      const actionId = (event as any)?.args?.actionId;
+    it('Should allow signer recovery while a normal action is pending', async function () {
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE);
+      await expect(lpStaking.proposeChangeSigner(signers[0].address, signers[4].address))
+        .to.emit(lpStaking, 'ActionProposed');
+      expect(await lpStaking.pendingActionCount()).to.equal(2);
+    });
 
-      expect(await lpStaking.pendingActionCount()).to.equal(1);
-
-      await expect(
-        lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
-      ).to.be.revertedWith('Pending action exists');
-
+    it('Should track concurrent normal proposals independently', async function () {
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE);
+      const actionId = await lpStaking.actionCounter();
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n);
+      expect(await lpStaking.pendingActionCount()).to.equal(2);
       await lpStaking.connect(signers[0]).approveAction(actionId);
       await lpStaking.connect(signers[1]).approveAction(actionId);
       await lpStaking.executeAction(actionId);
-
-      expect(await lpStaking.pendingActionCount()).to.equal(0);
-
-      await expect(lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address))
-        .to.emit(lpStaking, 'ActionProposed');
+      expect(await lpStaking.pendingActionCount()).to.equal(1);
     });
 
-    it('Should block normal proposals while any action is pending', async function () {
-      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
-      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
-      const actionId = (event as any)?.args?.actionId;
-
-      expect(await lpStaking.pendingActionCount()).to.equal(1);
-
-      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n))
-        .to.be.revertedWith('Pending action exists');
-
-      await lpStaking.connect(signers[0]).approveAction(actionId);
-      await lpStaking.connect(signers[1]).approveAction(actionId);
-      await lpStaking.executeAction(actionId);
-
-      expect(await lpStaking.pendingActionCount()).to.equal(0);
-
-      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE + 1n))
-        .to.emit(lpStaking, 'ActionProposed');
-    });
-
-    it('Should block normal actions and additional signer changes while a signer change is pending', async function () {
-      const oldSigner = signers[0];
-      const replacementSigner = signers[4];
-      const receipt = await (
-        await lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
-      ).wait();
-      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
-      const actionId = (event as any)?.args?.actionId;
-
-      expect(await lpStaking.pendingActionCount()).to.equal(1);
+    it('Should allow concurrent proposals and invalidate them on signer rotation', async function () {
+      await lpStaking.proposeChangeSigner(signers[0].address, signers[4].address);
+      const actionId = await lpStaking.actionCounter();
       expect(await lpStaking.pendingChangeSignerActionId()).to.equal(actionId);
-
-      await expect(lpStaking.proposeSetHourlyRewardRate(NEW_RATE))
-        .to.be.revertedWith('Pending action exists');
-
-      await expect(
-        lpStaking.proposeChangeSigner(signers[1].address, signers[5].address)
-      ).to.be.revertedWith('Pending action exists');
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE);
+      const normalId = await lpStaking.actionCounter();
+      await lpStaking.proposeChangeSigner(signers[1].address, signers[5].address);
+      const secondRotationId = await lpStaking.actionCounter();
+      expect(await lpStaking.pendingActionCount()).to.equal(3);
+      await lpStaking.connect(signers[0]).approveAction(actionId);
+      await lpStaking.connect(signers[1]).approveAction(actionId);
+      await lpStaking.executeAction(actionId);
+      expect(await lpStaking.pendingActionCount()).to.equal(0);
+      expect(await lpStaking.isActionExpired(normalId)).to.equal(true);
+      expect(await lpStaking.isActionExpired(secondRotationId)).to.equal(true);
     });
 
     it('Should unblock proposals after a pending action is rejected', async function () {
@@ -1086,26 +1061,15 @@ describe('LPStaking', function () {
         .to.emit(lpStaking, 'ActionProposed');
     });
 
-    it('Should require expired actions to be marked expired before they stop blocking signer changes', async function () {
-      const oldSigner = signers[0];
-      const replacementSigner = signers[4];
-      const receipt = await (await lpStaking.proposeSetHourlyRewardRate(NEW_RATE)).wait();
-      const event = receipt?.logs?.find((e: any) => e.fragment.name === 'ActionProposed');
-      const actionId = (event as any)?.args?.actionId;
-
+    it('Should not require expired-action cleanup before signer recovery', async function () {
+      await lpStaking.proposeSetHourlyRewardRate(NEW_RATE);
+      const expiredId = await lpStaking.actionCounter();
       await ethers.provider.send('evm_increaseTime', [7 * 24 * 60 * 60 + 1]);
       await ethers.provider.send('evm_mine', []);
-
-      await expect(
-        lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address)
-      ).to.be.revertedWith('Pending action exists');
-
-      await lpStaking.handleExpiredAction(actionId);
-
-      expect(await lpStaking.pendingActionCount()).to.equal(0);
-
-      await expect(lpStaking.proposeChangeSigner(oldSigner.address, replacementSigner.address))
-        .to.emit(lpStaking, 'ActionProposed');
+      await lpStaking.proposeChangeSigner(signers[0].address, signers[4].address);
+      expect(await lpStaking.pendingActionCount()).to.equal(2);
+      await lpStaking.handleExpiredAction(expiredId);
+      expect(await lpStaking.pendingActionCount()).to.equal(1);
     });
 
     it('Should clean up expired actions by bounded range', async function () {

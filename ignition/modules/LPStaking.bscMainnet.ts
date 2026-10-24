@@ -1,26 +1,15 @@
 import { buildModule } from '@nomicfoundation/hardhat-ignition/modules';
+const { loadDeploymentConfig } = require('../../scripts/deployment-config.cjs');
 
-const rewardToken = process.env.BSC_MAINNET_REWARD_TOKEN;
-const initialSigners = [
-  process.env.BSC_MAINNET_SIGNER_1,
-  process.env.BSC_MAINNET_SIGNER_2,
-  process.env.BSC_MAINNET_SIGNER_3,
-  process.env.BSC_MAINNET_SIGNER_4,
-].filter((value): value is string => value !== undefined && value !== '');
-
-if (!rewardToken) {
-  throw new Error('Missing BSC_MAINNET_REWARD_TOKEN in environment');
-}
-
-if (initialSigners.length !== 4) {
-  throw new Error('BSC mainnet deployment requires exactly 4 signer addresses');
-}
+const { rewardToken, initialSigners, owner } = loadDeploymentConfig('BSC_MAINNET');
 
 const LPStakingModule = buildModule('LPStakingModule', (m) => {
   const lpStaking = m.contract('LPStaking', [rewardToken, initialSigners], {
     id: 'LPStaking',
+    // Ownable initializes ownership from msg.sender. Binding the sender makes
+    // the reviewed owner/overlap checks apply to the account that really deploys.
+    from: owner,
   });
-
   return { lpStaking };
 });
 
