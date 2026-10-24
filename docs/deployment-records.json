@@ -1,0 +1,78 @@
+{
+  "status": "Historical repository records only; not live-chain verification. Journals record module IDs but not original module source filenames.",
+  "auditedRepositoryRevision": "637477e3351d05e4e3beb5640a3fbb1af3bfcfe2",
+  "deployments": [
+    {
+      "deploymentDirectory": "ignition/deployments/bsc-mainnet-v2",
+      "chainId": 56,
+      "moduleId": "LPStakingModule",
+      "sourceModuleFile": null,
+      "contractName": "LPStaking",
+      "recordedAddress": "0x67e7cAEc6A043E2E3bFCa27eC5BA12D1ed6EFe4C",
+      "recordedDeployer": "0x0c007528b70d3675c4fcae2fc62a7f884dae5071",
+      "constructorArguments": [
+        "0x5AfdCC93D794762C785Ec14Fb2a24c4aBDbB8aaa",
+        [
+          "0xb5A5bD462A0a76c02990d0FBE3321e92E0B03ABC",
+          "0x6EeA3d348f44a59142cDD46336BB70051C2e4F19",
+          "0x65870F323823b654DA0422bEDdFF4e3fB2b82361",
+          "0x0fE756EB674200Ed60880813eEf198994CC278d8"
+        ]
+      ]
+    },
+    {
+      "deploymentDirectory": "ignition/deployments/bsc-testnet-v2",
+      "chainId": 97,
+      "moduleId": "LPStakingModule",
+      "sourceModuleFile": null,
+      "contractName": "LPStaking",
+      "recordedAddress": "0x87104FB0A772280697F87eE5Af99E18DBbBbbE24",
+      "recordedDeployer": "0x0c007528b70d3675c4fcae2fc62a7f884dae5071",
+      "constructorArguments": [
+        "0x7F772C7D3C6d6b5c6777C927827F119e59DDcdb0",
+        [
+          "0x2fBe1cd4BC1718B7625932f35e3cb03E6847289F",
+          "0xd3ac493dc0dA16077CC589A838ac473bC010324F",
+          "0x9249cFE964C49Cf2d2D0DBBbB33E99235707aa61",
+          "0xea7bb30fbcCBB2646B0eFeB31382D3A4da07a3cC"
+        ]
+      ]
+    },
+    {
+      "deploymentDirectory": "ignition/deployments/chain-137",
+      "chainId": 137,
+      "moduleId": "LPStakingModule",
+      "sourceModuleFile": null,
+      "contractName": "LPStaking",
+      "recordedAddress": "0xCb36BeF8f079a0759DCC9F3988bC533F090Aa90c",
+      "recordedDeployer": "0x35900740c20f8219791f9e4994938662d75c65e5",
+      "constructorArguments": [
+        "0x693ed886545970F0a3ADf8C59af5cCdb6dDF0a76",
+        [
+          "0xb5A5bD462A0a76c02990d0FBE3321e92E0B03ABC",
+          "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+          "0x32B6f2C027D4c9D99Ca07d047D17987390a5EB39",
+          "0xEc33aDc8A175DCc44f809909B9aae9F4F5760818"
+        ]
+      ]
+    },
+    {
+      "deploymentDirectory": "ignition/deployments/chain-97",
+      "chainId": 97,
+      "moduleId": "LPStakingModule",
+      "sourceModuleFile": null,
+      "contractName": "LPStaking",
+      "recordedAddress": "0x24F28129B65E9AeDdAfE3f1Fc67ab82DDCF30dF9",
+      "recordedDeployer": "0x63bc72b99d3b5bc1a97bd6e843b669b65a690a66",
+      "constructorArguments": [
+        "0x7F772C7D3C6d6b5c6777C927827F119e59DDcdb0",
+        [
+          "0x2fBe1cd4BC1718B7625932f35e3cb03E6847289F",
+          "0xd3ac493dc0dA16077CC589A838ac473bC010324F",
+          "0x9249cFE964C49Cf2d2D0DBBbB33E99235707aa61",
+          "0xea7bb30fbcCBB2646B0eFeB31382D3A4da07a3cC"
+        ]
+      ]
+    }
+  ]
+}

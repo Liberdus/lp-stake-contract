@@ -9,9 +9,10 @@
     "deploy:bsc-mainnet:verify": "node scripts/deploy-and-verify-bsc-mainnet.js",
     "deploy:bsc-testnet": "hardhat ignition deploy ignition/modules/LPStaking.bscTestnet.ts --network bscTestnet",
     "deploy:bsc-testnet:verify": "node scripts/deploy-and-verify-bsc-testnet.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "hardhat test --network hardhat",
     "verify:bsc-mainnet": "node scripts/verify-bsc-mainnet-v2.js",
-    "verify:bsc-testnet": "node scripts/verify-bsc-testnet-v2.js"
+    "verify:bsc-testnet": "node scripts/verify-bsc-testnet-v2.js",
+    "test:audit": "hardhat test --network hardhat test/AuditRewards.test.ts test/AuditGovernance.test.cjs test/DeploymentConfig.audit.test.ts"
   },
   "keywords": [],
   "author": "",

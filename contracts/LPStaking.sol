@@ -13,12 +13,15 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
     // ============ Constants ============
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    uint256 public constant PRECISION = 1e18;
+    // Higher precision plus a bounded aggregate supply bounds discarded cohort dust; see docs/audit-remediation.md.
+    // All products use 512-bit mulDiv and one-raw-unit residual stakes remain valid.
+    uint256 public constant PRECISION = 1e30;
+    uint256 public constant MAX_TOTAL_STAKED = type(uint128).max;
     uint256 public constant MAX_WEIGHT = 1e21; // weight 1000 precision 1e18
     uint256 public constant MIN_STAKE = 1e15; // 1e15 precision 1e18
     uint256 public constant MAX_PAIRS = 100;
     uint256 public constant REQUIRED_APPROVALS = 3;
-    uint256 public constant REQUIRED_REJECTIONS = 2;
+    uint256 public constant REQUIRED_REJECTIONS = 2; // Four-authority proposals; signer changes may require three.
     uint256 private constant SECONDS_PER_HOUR = 3600;
     uint256 private constant ACTION_EXPIRY = 7 days; // Actions expire after 7 days
 
@@ -68,6 +71,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         address[] rejectedBy;
         uint256 proposedTime; // Timestamp when action was proposed
         bool rejected;
+        uint256 governanceEpoch;
+        bool hasOwnerAuthority;
+        bool ownerAuthorityUsed;
     }
 
     // ============ State Variables ============
@@ -82,11 +88,18 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     // Reward tracking state
     mapping(address => uint256) public rewardPerTokenStored;
     mapping(address => uint256) public lastUpdateTime;
+    mapping(address => uint256) public emissionTimeRemainder;
+    mapping(address => uint256) public emissionWeightRemainder;
+    mapping(address => uint256) public rewardPerTokenRemainder;
+    mapping(address => mapping(address => uint256)) public userRewardRemainder;
     mapping(address => uint256) public totalStaked;
     uint256 public totalWeight;
     uint256 public actionCounter;
     uint256 public totalRewardsObligated;
-    uint256 public pendingActionCount;
+    uint256 public governanceEpoch;
+    uint256 public pendingActionCount; // Open proposals in the current signer epoch only.
+    // Legacy informational hint: the newest signer proposal, or zero after it closes.
+    // It is not a lock and does not enumerate other concurrent signer proposals.
     uint256 public pendingChangeSignerActionId;
     mapping(uint256 => PendingAction) public actions;
 
@@ -111,6 +124,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     event ActionExpired(uint256 actionId);
     event RewardsWithdrawn(address recipient, uint256 amount);
     event ActionRejected(uint256 actionId, address rejecter);
+    event GovernanceEpochAdvanced(uint256 indexed governanceEpoch);
 
     // ============ Constructor ============
     constructor(address _rewardToken, address[] memory _initialSigners) Ownable(msg.sender) {
@@ -155,7 +169,12 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
     function isActionExpired(uint256 actionId) public view returns (bool) {
         PendingAction storage pa = actions[actionId];
-        return block.timestamp > pa.proposedTime + ACTION_EXPIRY;
+        return pa.governanceEpoch != governanceEpoch || block.timestamp > pa.proposedTime + ACTION_EXPIRY;
+    }
+
+    function getRequiredRejections(uint256 actionId) public view returns (uint256) {
+        require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
+        return actions[actionId].hasOwnerAuthority ? 3 : REQUIRED_REJECTIONS;
     }
 
     function earned(
@@ -167,21 +186,16 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
         if (
             block.timestamp > lastUpdateTime[lpToken] &&
-            totalStaked[lpToken] > 0 &&
-            totalWeight > 0
+            totalStaked[lpToken] > 0 && totalWeight > 0
         ) {
-            uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-            uint256 pairRewards = _calculatePairRewards(lpToken, timeDelta);
-            currentRewardPerToken +=
-                (pairRewards * PRECISION) /
-                totalStaked[lpToken];
+            (uint256 pairRewards,,) = _previewPairRewards(lpToken, block.timestamp - lastUpdateTime[lpToken]);
+            (uint256 increment,) = _mulDivCarry(pairRewards, PRECISION, totalStaked[lpToken], rewardPerTokenRemainder[lpToken]);
+            currentRewardPerToken += increment;
         }
-
-        return
-            (storedStake.amount *
-                (currentRewardPerToken - storedStake.rewardPerTokenPaid)) /
-            PRECISION +
-            storedStake.pendingRewards;
+        (uint256 rewards,) = _mulDivCarry(storedStake.amount,
+            currentRewardPerToken - storedStake.rewardPerTokenPaid,
+            PRECISION, userRewardRemainder[user][lpToken]);
+        return storedStake.pendingRewards + rewards;
     }
 
     function getPairInfo(
@@ -293,9 +307,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         updateRewardPerToken(lpToken);
         UserStake storage userStake = userStakes[msg.sender][lpToken];
 
-        if (userStake.amount > 0) {
-            userStake.pendingRewards = earned(msg.sender, lpToken);
-        }
+        _settleUser(msg.sender, lpToken);
 
         uint256 balanceBefore = IERC20(lpToken).balanceOf(address(this));
         IERC20(lpToken).safeTransferFrom(msg.sender, address(this), amount);
@@ -303,6 +315,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(received >= MIN_STAKE, "Received amount too low");
         require(received <= type(uint128).max, "Stake amount too high");
 
+        require(totalStaked[lpToken] + received <= MAX_TOTAL_STAKED, "Total stake too high");
+        // Fractional pool emissions belong to the old cohort, never to a newcomer.
+        _resetCohortRemainders(lpToken);
         userStake.amount += received;
         totalStaked[lpToken] += received;
         userStake.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
@@ -381,7 +396,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             "Amount exceeds surplus rewards"
         );
         require(amount <= type(uint128).max, "Amount too large");
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -404,7 +418,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 newRate
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(newRate <= type(uint128).max, "Rate too high");
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -434,7 +447,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             require(weights[i] <= MAX_WEIGHT, "Weight exceeds maximum");
             require(lpTokens[i] != address(0), "Invalid LP token address");
         }
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -467,7 +479,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(bytes(pairName).length <= 32, "Pair name too long");
         require(bytes(platform).length > 0, "Empty platform name");
         require(bytes(platform).length <= 32, "Platform name too long");
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -489,7 +500,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     ) external onlyRole(ADMIN_ROLE) returns (uint256) {
         require(lpToken != address(0), "Invalid pair address");
         require(pairs[lpToken].isActive, "Pair not active or doesn't exist");
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -511,7 +521,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
         require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
         require(newSigner != address(0), "Invalid new signer");
-        _requireCanPropose();
 
         actionCounter++;
         PendingAction storage pa = actions[actionCounter];
@@ -533,16 +542,6 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
 
     function approveAction(uint256 actionId) external {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
-        
-        PendingAction storage pa = actions[actionId];
-        if (pa.actionType == ActionType.CHANGE_SIGNER) {
-            require(
-                hasRole(ADMIN_ROLE, msg.sender) || msg.sender == owner(),
-                "Caller must have ADMIN_ROLE or owner"
-            );
-        } else {
-            require(hasRole(ADMIN_ROLE, msg.sender), "Caller must have ADMIN_ROLE");
-        }
         _approveActionInternal(actionId);
     }
 
@@ -557,6 +556,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(!pa.executed, "Already executed");
         require(!pa.expired, "Action has expired");
         require(!pa.rejected, "Action was rejected");
+        require(pa.governanceEpoch == governanceEpoch, "Governance configuration changed");
         require(pa.approvals >= REQUIRED_APPROVALS, "Not enough approvals");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
@@ -572,6 +572,22 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             pa.actionType == ActionType.REMOVE_PAIR
         ) {
             updateAllRewards();
+            // Rate and weight denominators change here. Settle the old parameters
+            // first, then discard their sub-unit emission fractions, not user dust.
+            bool changesEmissions = pa.actionType == ActionType.ADD_PAIR ||
+                (pa.actionType == ActionType.REMOVE_PAIR && pairs[pa.pairToRemove].weight != 0) ||
+                (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE && pa.newHourlyRewardRate != hourlyRewardRate);
+            if (pa.actionType == ActionType.UPDATE_PAIR_WEIGHTS) {
+                for (uint256 i = 0; i < pa.pairs.length; i++) {
+                    if (pairs[pa.pairs[i]].weight != pa.weights[i]) changesEmissions = true;
+                }
+            }
+            if (changesEmissions) {
+                for (uint256 i = 0; i < activePairs.length; i++) {
+                    emissionTimeRemainder[activePairs[i]] = 0;
+                    emissionWeightRemainder[activePairs[i]] = 0;
+                }
+            }
         }
 
         if (pa.actionType == ActionType.SET_HOURLY_REWARD_RATE) {
@@ -616,7 +632,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             });
             activePairs.push(pa.pairToAdd);
             totalWeight += pa.weightToAdd;
-            rewardPerTokenStored[pa.pairToAdd] = 0;
+            // Keep the accumulator monotonic across removal and re-addition.
             lastUpdateTime[pa.pairToAdd] = block.timestamp;
             emit PairAdded(pa.pairToAdd, pa.platformToAdd, pa.weightToAdd);
         } else if (pa.actionType == ActionType.REMOVE_PAIR) {
@@ -632,6 +648,11 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         } else if (pa.actionType == ActionType.CHANGE_SIGNER) {
             address oldSigner = pa.pairToAdd;
             address newSigner = pa.pairToRemove;
+
+            // Concurrent proposals must never grow the signer set or reuse stale membership.
+            require(hasRole(ADMIN_ROLE, oldSigner), "Old signer not found");
+            require(!hasRole(ADMIN_ROLE, newSigner), "New signer already exists");
+            require(newSigner != address(0), "Invalid new signer");
 
             _revokeRole(ADMIN_ROLE, oldSigner);
             _grantRole(ADMIN_ROLE, newSigner);
@@ -655,15 +676,23 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         }
 
         _closePendingAction(actionId);
+        if (pa.actionType == ActionType.CHANGE_SIGNER) {
+            // O(1) invalidation: no historical proposal scan can block signer recovery.
+            governanceEpoch++;
+            pendingActionCount = 0;
+            pendingChangeSignerActionId = 0;
+            emit GovernanceEpochAdvanced(governanceEpoch);
+        }
         emit ActionExecuted(actionId);
     }
 
-    function rejectAction(uint256 actionId) external onlyRole(ADMIN_ROLE) {
+    function rejectAction(uint256 actionId) external {
         require(actionId > 0 && actionId <= actionCounter, "Invalid actionId");
         PendingAction storage pa = actions[actionId];
         require(!pa.executed, "Already executed");
         require(!pa.expired, "Action has expired");
         require(!pa.rejected, "Already rejected");
+        require(pa.governanceEpoch == governanceEpoch, "Governance configuration changed");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
@@ -680,10 +709,11 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             require(pa.rejectedBy[i] != msg.sender, "Already rejected");
         }
 
+        _consumeVotingAuthority(pa);
         pa.rejectedBy.push(msg.sender);
         pa.rejections++;
 
-        if (pa.rejections >= REQUIRED_REJECTIONS) {
+        if (pa.rejections >= getRequiredRejections(actionId)) {
             pa.rejected = true;
             _closePendingAction(actionId);
         }
@@ -699,6 +729,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         address receiver
     ) internal {
         require(receiver != address(0), "Invalid receiver");
+        require(amount > 0, "Amount must be greater than zero");
 
         LiquidityPair storage pair = pairs[lpToken];
         require(pair.isActive, "Pair not active");
@@ -707,7 +738,9 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(userStake.amount >= amount, "Insufficient stake");
 
         updateRewardPerToken(lpToken);
-        uint256 rewards = earned(msg.sender, lpToken);
+        _settleUser(msg.sender, lpToken);
+        uint256 rewards = userStake.pendingRewards;
+        _resetCohortRemainders(lpToken);
         if (amount == userStake.amount) {
             userStake.amount = 0;
         } else {
@@ -749,7 +782,8 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         uint256 rewards;
         if (pair.isActive) {
             updateRewardPerToken(lpToken);
-            rewards = earned(msg.sender, lpToken);
+            _settleUser(msg.sender, lpToken);
+            rewards = userStake.pendingRewards;
         } else {
             rewards = userStake.pendingRewards;
         }
@@ -784,37 +818,75 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     }
 
     function updateRewardPerToken(address lpToken) internal {
-        uint256 totalSupply = totalStaked[lpToken];
-        uint256 timeDelta = block.timestamp - lastUpdateTime[lpToken];
-
-        if (totalSupply > 0 && timeDelta > 0 && totalWeight > 0) {
-            uint256 pairRewards = _calculatePairRewards(lpToken, timeDelta);
-            rewardPerTokenStored[lpToken] +=
-                (pairRewards * PRECISION) /
-                totalSupply;
-            totalRewardsObligated += pairRewards;
+        uint256 supply = totalStaked[lpToken];
+        uint256 elapsed = block.timestamp - lastUpdateTime[lpToken];
+        if (supply > 0 && elapsed > 0 && totalWeight > 0) {
+            (uint256 reward, uint256 timeRem, uint256 weightRem) = _previewPairRewards(lpToken, elapsed);
+            emissionTimeRemainder[lpToken] = timeRem;
+            emissionWeightRemainder[lpToken] = weightRem;
+            (uint256 increment, uint256 remainder) = _mulDivCarry(reward, PRECISION, supply, rewardPerTokenRemainder[lpToken]);
+            rewardPerTokenStored[lpToken] += increment;
+            rewardPerTokenRemainder[lpToken] = remainder;
+            // Reserve all whole emitted units, including conservatively retained dust.
+            totalRewardsObligated += reward;
         }
-
         lastUpdateTime[lpToken] = block.timestamp;
     }
 
-    function _calculatePairRewards(
-        address lpToken,
-        uint256 timeDelta
-    ) internal view returns (uint256) {
-        uint256 elapsedRewards = Math.mulDiv(
-            hourlyRewardRate,
-            timeDelta,
-            SECONDS_PER_HOUR
-        );
-        return Math.mulDiv(elapsedRewards, pairs[lpToken].weight, totalWeight);
+    function _previewPairRewards(address lpToken, uint256 elapsed)
+        internal view returns (uint256 reward, uint256 timeRem, uint256 weightRem)
+    {
+        uint256 elapsedRewards;
+        (elapsedRewards, timeRem) = _mulDivCarry(hourlyRewardRate, elapsed,
+            SECONDS_PER_HOUR, emissionTimeRemainder[lpToken]);
+        (reward, weightRem) = _mulDivCarry(elapsedRewards, pairs[lpToken].weight,
+            totalWeight, emissionWeightRemainder[lpToken]);
     }
 
-    function _requireCanPropose() internal view {
-        require(pendingActionCount == 0, "Pending action exists");
+    function _calculatePairRewards(address lpToken, uint256 elapsed) internal view returns (uint256) {
+        (uint256 reward,,) = _previewPairRewards(lpToken, elapsed);
+        return reward;
+    }
+
+    // Carry must be less than denominator. Reset pool carries whenever their
+    // denominator or earning cohort changes; user carries always stay with user.
+    function _mulDivCarry(uint256 a, uint256 b, uint256 denominator, uint256 carry)
+        internal pure returns (uint256 quotient, uint256 remainder)
+    {
+        quotient = Math.mulDiv(a, b, denominator);
+        remainder = mulmod(a, b, denominator);
+        if (remainder >= denominator - carry) {
+            quotient++;
+            remainder -= denominator - carry;
+        } else {
+            remainder += carry;
+        }
+    }
+
+    function _settleUser(address user, address lpToken) internal {
+        UserStake storage position = userStakes[user][lpToken];
+        (uint256 reward, uint256 remainder) = _mulDivCarry(position.amount,
+            rewardPerTokenStored[lpToken] - position.rewardPerTokenPaid,
+            PRECISION, userRewardRemainder[user][lpToken]);
+        position.pendingRewards += reward;
+        position.rewardPerTokenPaid = rewardPerTokenStored[lpToken];
+        position.lastRewardTime = block.timestamp;
+        userRewardRemainder[user][lpToken] = remainder;
+    }
+
+    function _resetCohortRemainders(address lpToken) internal {
+        emissionTimeRemainder[lpToken] = 0;
+        emissionWeightRemainder[lpToken] = 0;
+        rewardPerTokenRemainder[lpToken] = 0;
     }
 
     function _openPendingAction(uint256 actionId) internal {
+        PendingAction storage pa = actions[actionId];
+        pa.governanceEpoch = governanceEpoch;
+        // Snapshot the number of independent authorities, not a transferable stream
+        // of owner addresses. An overlapping owner cannot later create a fifth seat.
+        pa.hasOwnerAuthority = pa.actionType == ActionType.CHANGE_SIGNER &&
+            owner() != address(0) && !hasRole(ADMIN_ROLE, owner());
         pendingActionCount++;
         if (actions[actionId].actionType == ActionType.CHANGE_SIGNER) {
             pendingChangeSignerActionId = actionId;
@@ -822,7 +894,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
     }
 
     function _closePendingAction(uint256 actionId) internal {
-        if (pendingActionCount > 0) {
+        if (actions[actionId].governanceEpoch == governanceEpoch && pendingActionCount > 0) {
             pendingActionCount--;
         }
         if (pendingChangeSignerActionId == actionId) {
@@ -835,6 +907,7 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
         require(!pa.executed, "Already executed");
         require(!pa.expired, "Action has expired");
         require(!pa.rejected, "Action was rejected");
+        require(pa.governanceEpoch == governanceEpoch, "Governance configuration changed");
         require(
             block.timestamp <= pa.proposedTime + ACTION_EXPIRY,
             "Action has expired"
@@ -849,9 +922,19 @@ contract LPStaking is ReentrancyGuard, AccessControl, Ownable2Step {
             require(pa.rejectedBy[i] != msg.sender, "Cannot approve after rejecting");
         }
 
+        _consumeVotingAuthority(pa);
         pa.approvedBy.push(msg.sender);
         pa.approvals++;
         emit ActionApproved(actionId, msg.sender);
+    }
+
+    function _consumeVotingAuthority(PendingAction storage pa) internal {
+        if (hasRole(ADMIN_ROLE, msg.sender)) return;
+        require(pa.hasOwnerAuthority && msg.sender == owner(), "Caller has no voting authority");
+        require(!pa.ownerAuthorityUsed, "Owner authority already used");
+        // Never reset this flag during transfer, acceptance, or renunciation.
+        // The same authority cannot approve and reject through different owners.
+        pa.ownerAuthorityUsed = true;
     }
 
     function _removeActivePair(address lpToken) internal {

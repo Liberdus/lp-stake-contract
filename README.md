@@ -56,3 +56,7 @@ The actions available through the admin interface are:
 - Withdraw the reward token to a specified address
 - Change one of the four signers; requires 3/5; the contract owner can also be one of the signers for this action
 - Multisig feature is managed by the contract itself and not done by different multisig contract
+
+## Deployment configuration
+
+Use only the reviewed BSC mainnet/testnet modules described in [the deployment safety guide](docs/deployment-safety.md). The legacy generic prod/test modules are disabled; they contained a public development signer. Local regression tests do not require any deployment credentials.
